@@ -27,6 +27,53 @@ import {
   Subscription,
 } from './browser_wasi_shim/wasi_defs.js';
 
+const SESSION_SCRIPT = String.raw`set +e
+rm -rf /tmp/flaxia-work
+mkdir -p /tmp/flaxia-work
+cp -a /workspace/. /tmp/flaxia-work/ 2>/dev/null
+chmod -R u+rwx /tmp/flaxia-work 2>/dev/null
+cd /tmp/flaxia-work
+stty -echo 2>/dev/null
+__flaxia_status=0
+__flaxia_sync() {
+  printf '\n__FLAXIA_SYNC_BEGIN_@NONCE@__\n'
+  find /tmp/flaxia-work -type f ! -path '/tmp/flaxia-work/.flaxia/*' | while IFS= read -r __f; do
+    printf 'F:%s\n' "@DOLLAR@{__f#/tmp/flaxia-work/}"
+    base64 -w0 "$__f" 2>/dev/null || base64 "$__f" | tr -d '\n'
+    printf '\n'
+  done
+  printf '__FLAXIA_DONE_@NONCE@__%s\n' "$__flaxia_status"
+  printf '__FLAXIA_SYNC_END_@NONCE@__\n'
+}
+__flaxia_run=0
+printf '__FLAXIA_READY_@NONCE@__\n'
+while IFS= read -r __line; do
+  case "$__line" in
+    __FLAXIA_RUN_BEGIN__)
+      : > /tmp/flaxia-run.b64
+      __flaxia_run=1
+      ;;
+    __FLAXIA_RUN_END__)
+      base64 -d /tmp/flaxia-run.b64 > /tmp/flaxia-run.sh
+      . /tmp/flaxia-run.sh
+      __flaxia_status=$?
+      __flaxia_run=0
+      ;;
+    __FLAXIA_SYNC__)
+      __flaxia_sync
+      ;;
+    __FLAXIA_QUIT__)
+      break
+      ;;
+    *)
+      if [ "$__flaxia_run" = "1" ]; then
+        printf '%s\n' "$__line" >> /tmp/flaxia-run.b64
+      fi
+      ;;
+  esac
+done
+`.replaceAll('@DOLLAR@', '$');
+
 const IMAGE_CACHE = 'flaxia-studio-linux-v1';
 const FETCH_SCRIPT = String.raw`import socket, ssl, sys, urllib.parse
 url = sys.argv[1]
@@ -81,6 +128,10 @@ self.onmessage = (event) => {
   if (!message || typeof message !== 'object') return;
   if ((message.type === 'net-init' || message.type === 'init') && message.buf instanceof SharedArrayBuffer) {
     registerSocketBuffer(message.buf);
+    return;
+  }
+  if (message.type === 'session-start') {
+    void startSession(message);
     return;
   }
   if (message.type === 'run') {
@@ -603,6 +654,245 @@ function installSocketHooks(wasi, listenfd, connfd) {
   };
 }
 
+// ------------------------------------------------------------
+// Persistent session mode
+// ------------------------------------------------------------
+class SessionInput {
+  constructor(shared) {
+    this.ctrl = new Int32Array(shared, 0, 1);
+    this.lengthView = new Int32Array(shared, 4, 1);
+    this.data = new Uint8Array(shared, 12);
+    this.pos = 0;
+    this.length = 0;
+  }
+
+  fd_read(size) {
+    if (this.pos >= this.length) {
+      this.pos = 0;
+      this.length = 0;
+    }
+    while (Atomics.load(this.ctrl, 0) === 0) {
+      Atomics.wait(this.ctrl, 0, 0);
+    }
+    this.length = Atomics.load(this.lengthView, 0);
+    const count = Math.min(size, this.length - this.pos);
+    const data = this.data.slice(this.pos, this.pos + count);
+    this.pos += count;
+    if (this.pos >= this.length) {
+      this.pos = 0;
+      this.length = 0;
+      Atomics.store(this.ctrl, 0, 0);
+    }
+    return { ret: 0, data };
+  }
+
+  hasData() {
+    return Atomics.load(this.ctrl, 0) !== 0 && Atomics.load(this.lengthView, 0) > 0;
+  }
+
+  fd_fdstat_get() {
+    return { ret: 0, fdstat: null };
+  }
+
+  fd_close() {
+    return 0;
+  }
+
+  fd_seek() {
+    return { ret: 0, offset: 0 };
+  }
+
+  fd_tell() {
+    return { ret: 0, offset: 0 };
+  }
+}
+
+function createSessionParser(nonce) {
+  const readyMarker = `__FLAXIA_READY_${nonce}__`;
+  const beginMarker = `__FLAXIA_SYNC_BEGIN_${nonce}__`;
+  const endMarker = `__FLAXIA_SYNC_END_${nonce}__`;
+  const donePattern = new RegExp(`__FLAXIA_DONE_${nonce}__(\\d+)`);
+  let raw = '';
+  let inDump = false;
+  let readySent = false;
+  const maxMarker = Math.max(readyMarker.length, beginMarker.length, endMarker.length);
+
+  return (text) => {
+    raw += text;
+    for (;;) {
+      if (inDump) {
+        const endIndex = raw.indexOf(endMarker);
+        if (endIndex === -1) return;
+        const dump = raw.slice(0, endIndex);
+        raw = raw.slice(endIndex + endMarker.length);
+        inDump = false;
+        const done = donePattern.exec(dump);
+        post({
+          type: 'session-files',
+          files: decodeDumpFiles(dump),
+          exitCode: done ? Number(done[1]) : 0,
+        });
+        continue;
+      }
+      if (!readySent && raw.includes(readyMarker)) {
+        raw = raw.replace(readyMarker, '');
+        readySent = true;
+        post({ type: 'session-ready' });
+        continue;
+      }
+      const beginIndex = raw.indexOf(beginMarker);
+      if (beginIndex !== -1) {
+        if (beginIndex > 0) post({ type: 'output', text: raw.slice(0, beginIndex) });
+        raw = raw.slice(beginIndex + beginMarker.length);
+        inDump = true;
+        continue;
+      }
+      const keep = maxMarker - 1;
+      if (raw.length > keep) {
+        const safe = raw.slice(0, raw.length - keep);
+        if (safe) post({ type: 'output', text: safe });
+        raw = raw.slice(raw.length - keep);
+      }
+      return;
+    }
+  };
+}
+
+function decodeDumpFiles(dump) {
+  const files = [];
+  const strict = new TextDecoder('utf-8', { fatal: true });
+  const lines = dump.split('\n');
+  let current = null;
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/\r$/, '');
+    if (line.startsWith('F:')) {
+      current = line.slice(2);
+      continue;
+    }
+    if (!current || !line) continue;
+    try {
+      const bytes = base64ToBytes(line);
+      try {
+        const text = strict.decode(bytes);
+        if (text.includes('\0')) throw new Error('binary');
+        files.push({ path: current, content: text, binary: false });
+      } catch {
+        files.push({ path: current, content: line, binary: true });
+      }
+    } catch {
+      // Ignore a malformed dump line rather than failing the session.
+    }
+    current = null;
+  }
+  return files;
+}
+
+function installSessionPoll(wasi, input) {
+  wasi.wasiImport.poll_oneoff = (inPtr, outPtr, subscriptions, neventsPtr) => {
+    if (subscriptions === 0) return 28;
+    const view = new DataView(wasi.inst.exports.memory.buffer);
+    const subs = [];
+    for (let index = 0; index < subscriptions; index += 1) {
+      subs.push(Subscription.read_bytes(view, inPtr + 48 * index));
+    }
+    const events = [];
+    let clockTimeout = Infinity;
+    const clocks = [];
+    for (let index = 0; index < subs.length; index += 1) {
+      const sub = subs[index];
+      if (sub.eventtype === EVENTTYPE_FD_READ) {
+        const fd = view.getUint32(inPtr + 48 * index + 16, true);
+        if (fd !== 0) return 28;
+      } else if (sub.eventtype === EVENTTYPE_CLOCK) {
+        clocks.push(sub);
+        clockTimeout = Math.min(clockTimeout, Number(sub.timeout) / 1_000_000);
+      } else {
+        return 28;
+      }
+    }
+    if (subs.some((sub) => sub.eventtype === EVENTTYPE_FD_READ)) {
+      const deadline = clockTimeout === Infinity ? Infinity : performance.now() + clockTimeout;
+      while (!input.hasData()) {
+        const remaining = deadline === Infinity ? 100 : Math.max(0, deadline - performance.now());
+        if (remaining <= 0) break;
+        const state = Atomics.load(input.ctrl, 0);
+        if (state === 0) Atomics.wait(input.ctrl, 0, 0, Math.min(remaining, 100));
+      }
+      if (input.hasData()) {
+        for (let index = 0; index < subs.length; index += 1) {
+          if (subs[index].eventtype === EVENTTYPE_FD_READ) {
+            events.push(new Event(subs[index].userdata, 0, EVENTTYPE_FD_READ));
+          }
+        }
+      }
+    }
+    if (events.length === 0 && clocks.length > 0) {
+      const waitMs = Math.min(100, clockTimeout);
+      if (waitMs > 0) {
+        const signal = new Int32Array(new SharedArrayBuffer(4));
+        Atomics.wait(signal, 0, 0, waitMs);
+      }
+      for (const sub of clocks) events.push(new Event(sub.userdata, 0, EVENTTYPE_CLOCK));
+    }
+    for (let index = 0; index < events.length; index += 1) {
+      events[index].write_bytes(view, outPtr + 32 * index);
+    }
+    view.setUint32(neventsPtr, events.length, true);
+    return 0;
+  };
+}
+
+async function startSession(message) {
+  try {
+    const bytes = await loadImage(message, (progress) => post({ type: 'progress', ...progress }));
+    const logicalKey = `${message.digest ?? message.version ?? message.imageUrl}:${message.chunks ?? 1}`;
+    let module;
+    if (moduleCacheEntry.key === logicalKey && moduleCacheEntry.module) {
+      module = moduleCacheEntry.module;
+    } else {
+      post({ type: 'progress', phase: 'compile', loaded: bytes.byteLength, total: bytes.byteLength });
+      module = await WebAssembly.compile(bytes);
+      moduleCacheEntry = { key: logicalKey, module };
+    }
+
+    const nonce = randomNonce();
+    const files = Array.isArray(message.files) ? message.files : [];
+    const workspaceDir = buildWorkspaceDirectory([
+      ...files,
+      { path: '.flaxia/session.sh', content: SESSION_SCRIPT.replaceAll('@NONCE@', nonce) },
+      { path: '.flaxia/fetch.py', content: FETCH_SCRIPT },
+    ]);
+    const preopen = new PreopenDirectory('/workspace', workspaceDir.contents);
+    const parser = createSessionParser(nonce);
+    const input = new SessionInput(message.inputBuf);
+    const output = new OutputFd((text) => {
+      parser(text);
+    });
+    const args = ['arg0', '-entrypoint', '/bin/sh', '--', '/workspace/.flaxia/session.sh'];
+    const env = [
+      'HOME=/workspace',
+      'USER=flaxia',
+      'TERM=dumb',
+      'PWD=/workspace',
+      'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+      'LANG=C.UTF-8',
+    ];
+    const wasi = new WASI(args, env, [input, output, output, preopen], { debug: false });
+    installSessionPoll(wasi, input);
+    const instantiated = await WebAssembly.instantiate(module, {
+      wasi_snapshot_preview1: wasi.wasiImport,
+    });
+    const instance = instantiated instanceof WebAssembly.Instance ? instantiated : instantiated.instance;
+    const result = wasi.start(instance);
+    post({ type: 'session-ended', code: typeof result === 'number' ? result : 0 });
+  } catch (error) {
+    post({
+      type: 'session-error',
+      message: error instanceof Error ? (error.stack ?? error.message) : String(error),
+    });
+  }
+}
+
 class OutputFd {
   constructor(onWrite) {
     this.onWrite = onWrite;
@@ -640,6 +930,12 @@ class OutputFd {
   fd_read() {
     return { ret: 0, data: new Uint8Array(0) };
   }
+}
+
+function randomNonce() {
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 function bytesToBase64(bytes) {

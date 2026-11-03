@@ -101,3 +101,10 @@ send it, and their 301 redirects are blocked before APK can proceed.
   same-origin proxy** in front of it. Do not create an open "allow everything"
   proxy: it becomes an SSRF/abuse endpoint and still cannot change third-party
   CORS behavior by itself.
+
+## Session vs JIT
+
+Normal commands run in one persistent session (`/workspace/.flaxia/session.sh`)
+and cost roughly 0.5–1 s after boot. gcc is still limited by CPU emulation.
+container2wasm's JIT backend (`c2w --to-js`, QEMU Wasm) would need a different
+prebuilt artifact and Emscripten loader; it is not mixed into this WASI image.

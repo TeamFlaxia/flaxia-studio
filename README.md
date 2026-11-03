@@ -14,6 +14,8 @@ quiet-craft surface language of Flaxia: emerald accents, 1px hairlines,
 - Light / dark / system themes with FOUC-free boot
 - container2wasm Debian Linux in a Web Worker
 - A terminal that routes commands to Linux once it is booted
+- A **persistent Linux session**: boot once, then commands run in the same guest
+  (~0.7 s instead of ~3 s per command; gcc itself remains CPU-bound)
 - `/workspace` sync between Monaco and the guest, including `gcc file.c && ./a.out`
 - Compiled binaries are saved as binary workspace files (visible in the explorer,
   downloadable, and included in Export ZIP)
@@ -42,6 +44,20 @@ npm run build:linux
 
 Then click **Boot Linux** in the top bar, or run `boot` in the terminal.
 
+## Performance
+
+The runtime uses two paths:
+
+| Path               | Use                                   | Cost                              |
+| ------------------ | ------------------------------------- | --------------------------------- |
+| Persistent session | Normal commands                       | ~0.7 s per command after one boot |
+| One-shot WASI      | Network commands and session fallback | ~3 s boot per command             |
+
+JIT (container2wasm's `--to-js` QEMU/Wasm path) is not enabled yet: the current
+prebuilt images are WASI/Bochs images, and a QEMU image needs a separate
+`c2w --to-js` artifact plus an Emscripten runtime. The session path removes the
+per-command boot cost, which is the largest fixed overhead today.
+
 ## Scripts
 
 ```bash
@@ -54,6 +70,7 @@ npm test               # node:test (path, zip, workspace)
 npm run test:e2e       # Playwright workspace smoke test against the preview server
 npm run test:linux     # Boot the full Debian image and run gcc in the browser
 npm run test:exec      # Compile and run a.out as two separate commands
+npm run test:session   # Verify the persistent session (gcc → a.out)
 npm run test:net       # Boot Lite, run `fetch`, and verify the Fetch proxy
 npm run test:manifest  # Legacy '/linux/manifest.json' settings fall back to auto
 npm run test:csp       # Strict CSP smoke test against scripts/serve-dist.mjs (port 4174)

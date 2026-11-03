@@ -39,6 +39,18 @@
 | `public/linux-runtime/worker.js` | WASI boot, `/workspace` preopen, sync                           |
 | `src/ui/`                        | Palette, dialogs, toasts, context menu                          |
 
+## Persistent session
+
+`LinuxRuntime.boot()` starts a long-lived WASI container running
+`/workspace/.flaxia/session.sh`. The shell reads base64-encoded run scripts from
+a SharedArrayBuffer stdin, executes them in `/tmp/flaxia-work`, and emits a file
+dump marker after each command. `LinuxSession` diffs host changes into the
+session and applies guest changes back to IndexedDB. Network commands still use
+a one-shot container because the guest must boot with DHCP.
+
+JIT is a separate future path: container2wasm's `--to-js` output is a
+QEMU/Emscripten image, not interchangeable with the WASI/Bochs image used here.
+
 ## Workspace sync
 
 1. `LinuxRuntime.run()` snapshots every text file into `{path, content}`.

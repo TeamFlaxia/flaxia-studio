@@ -1299,7 +1299,7 @@ export class App implements ShellHostish {
     this.shell.writeLine('\x1b[38;2;100;116;139m[linux] starting container2wasm image…\x1b[0m');
     this.log('Booting Linux…');
     try {
-      const result = await this.linux.boot((text) => this.shell.writeLine(text.trimEnd()));
+      const result = await this.linux.boot((text) => this.shell.writeLine(text.trimEnd()), this.workspace);
       this.shell.writeLine(`\x1b[38;2;16;185;129m[linux] ready in ${result.durationMs} ms\x1b[0m`);
       this.log(`Linux ready in ${result.durationMs} ms.`);
       toast('Linux ready', 'The workspace is mounted at /workspace.', 'success', 3000);

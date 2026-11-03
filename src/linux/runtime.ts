@@ -1,5 +1,6 @@
 import type { Workspace } from '../fs/workspace';
 import { loadManifest, type ResolvedLinuxImage } from './manifest';
+import { LinuxSession } from './session';
 
 export type LinuxState = 'idle' | 'loading' | 'ready' | 'running' | 'error';
 
@@ -66,6 +67,7 @@ export class LinuxRuntime {
   private workerNetworkReady = false;
   private networkEnabled = true;
   private networkFailed = false;
+  private session: LinuxSession | null = null;
 
   get manifestUrl(): string {
     return this.manifestSource;
@@ -74,6 +76,8 @@ export class LinuxRuntime {
   private manifestSource = 'auto';
 
   setManifestUrl(url: string): void {
+    this.session?.dispose();
+    this.session = null;
     this.manifestSource = url.trim() || 'auto';
     this.image = null;
     this.setState('idle', 'Linux', 'Not booted');
@@ -109,12 +113,14 @@ export class LinuxRuntime {
     return this.state === 'ready' || this.state === 'running';
   }
 
-  async boot(onOutput: (text: string) => void = () => {}): Promise<LinuxRunResult> {
+  async boot(onOutput: (text: string) => void = () => {}, workspace?: Workspace): Promise<LinuxRunResult> {
     if (this.state === 'loading' || this.state === 'running') {
       throw new Error('Linux is already starting or running a command.');
     }
+    const files = workspace ? snapshotFiles(workspace) : [];
     if (this.state === 'ready' && this.image) {
-      return this.enqueue('uname -a && echo ready', '', onOutput, []);
+      if (this.session) return this.session.run('uname -a && echo ready', '', onOutput, files);
+      return this.enqueue('uname -a && echo ready', '', onOutput, files);
     }
 
     this.setState('loading', 'Linux', 'Loading manifest…');
@@ -122,13 +128,27 @@ export class LinuxRuntime {
       const image = await this.resolveImage();
       this.image = image;
       this.label = image.label ?? 'Linux';
-      this.setState('loading', this.label, 'Starting Linux…');
-      const result = await this.enqueue('uname -a', '', onOutput);
-      if (result.exitCode !== 0) {
-        throw new Error(`Linux boot check exited with code ${result.exitCode}.`);
+      this.setState('loading', this.label, 'Starting session…');
+      try {
+        const session = new LinuxSession(WORKER_URL, image);
+        await session.start(files);
+        this.session = session;
+        const result = await session.run('uname -a', '', onOutput, files);
+        if (result.exitCode !== 0) throw new Error(`Linux boot check exited with code ${result.exitCode}.`);
+        this.setState('ready', this.label, `Ready · ${image.version}`);
+        return result;
+      } catch (sessionError) {
+        console.warn('[flaxia] persistent session failed:', sessionError);
+        this.session?.dispose();
+        this.session = null;
+        this.setState('loading', this.label, 'Starting Linux…');
+        const result = await this.enqueue('uname -a', '', onOutput, files);
+        if (result.exitCode !== 0) {
+          throw new Error(`Linux boot check exited with code ${result.exitCode}.`);
+        }
+        this.setState('ready', this.label, `Ready · ${image.version} (one-shot)`);
+        return result;
       }
-      this.setState('ready', this.label, `Ready · ${image.version}`);
-      return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.setState('error', 'Linux', message);
@@ -136,7 +156,7 @@ export class LinuxRuntime {
     }
   }
 
-  run(
+  async run(
     command: string,
     cwd: string,
     onOutput: (text: string) => void,
@@ -146,18 +166,29 @@ export class LinuxRuntime {
     if (!this.image) {
       return Promise.reject(new Error('Boot Linux before running commands.'));
     }
-    const files = workspace.filePaths().map((path) => {
-      const entry = workspace.get(path);
-      return {
-        path,
-        content: entry?.content ?? '',
-        binary: entry?.binary === true,
-      };
-    });
+    const files = snapshotFiles(workspace);
+    if (!network && this.session) {
+      this.setState('running', this.label, `Running: ${command.slice(0, 48)}`);
+      try {
+        const result = await this.session.run(command, cwd, onOutput, files);
+        this.setState('ready', this.label, `Ready · ${this.image?.version ?? ''}`);
+        return result;
+      } catch {
+        this.session?.dispose();
+        this.session = null;
+        this.label = this.label.replace(/ \(session\)$/, '');
+        this.setState('loading', this.label, 'Restarting without session…');
+        const result = await this.enqueue(command, cwd, onOutput, files, false);
+        this.setState('ready', this.label, `Ready · ${this.image?.version ?? ''} (one-shot)`);
+        return result;
+      }
+    }
     return this.enqueue(command, cwd, onOutput, files, network);
   }
 
   async clearCache(): Promise<void> {
+    this.session?.dispose();
+    this.session = null;
     this.worker?.terminate();
     this.stackWorker?.terminate();
     this.worker = null;
@@ -174,6 +205,8 @@ export class LinuxRuntime {
   }
 
   dispose(): void {
+    this.session?.dispose();
+    this.session = null;
     this.worker?.terminate();
     this.stackWorker?.terminate();
     this.worker = null;
@@ -375,4 +408,15 @@ export class LinuxRuntime {
     for (const listener of this.listeners) listener(status);
     window.dispatchEvent(new CustomEvent<LinuxStatus>('flaxia:linux-status', { detail: status }));
   }
+}
+
+function snapshotFiles(workspace: Workspace): LinuxFile[] {
+  return workspace.filePaths().map((path) => {
+    const entry = workspace.get(path);
+    return {
+      path,
+      content: entry?.content ?? '',
+      binary: entry?.binary === true,
+    };
+  });
 }
