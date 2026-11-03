@@ -238,7 +238,11 @@ export class LinuxRuntime {
   }
 
   private async resolveImage(): Promise<ResolvedLinuxImage> {
-    if (this.manifestSource !== 'auto') return loadManifest(this.manifestSource);
+    const legacyProductionPath =
+      this.manifestSource === '/linux/manifest.json' || this.manifestSource === 'linux/manifest.json';
+    if (this.manifestSource !== 'auto' && !legacyProductionPath) {
+      return loadManifest(this.manifestSource);
+    }
     const candidates = ['linux/manifest.json', 'linux/manifest-lite.json', 'linux/manifest-full.json'];
     let lastError: Error | null = null;
     for (const candidate of candidates) {

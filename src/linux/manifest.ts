@@ -35,11 +35,17 @@ export async function loadManifest(url: string): Promise<ResolvedLinuxImage> {
     throw new Error(`Linux manifest request failed (${response.status}).`);
   }
 
+  const body = await response.text();
   let parsed: unknown;
   try {
-    parsed = await response.json();
+    parsed = JSON.parse(body) as unknown;
   } catch {
-    throw new Error('Linux manifest is not valid JSON.');
+    if (body.trimStart().startsWith('<')) {
+      throw new Error(
+        `No Linux image manifest at ${url} (the server returned HTML). Run \`npm run fetch:linux-lite\` or build one with \`npm run build:linux\`.`,
+      );
+    }
+    throw new Error(`Linux manifest is not valid JSON at ${url}.`);
   }
 
   if (!isRecord(parsed)) throw new Error('Linux manifest must be an object.');
