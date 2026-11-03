@@ -69,5 +69,5 @@ const manifest = {
   builtAt: new Date().toISOString(),
   c2wVersion: 'prebuilt',
 };
-writeFileSync(join(outDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
-console.log(`Wrote manifest.json (${chunks} chunks, ${all.length} bytes).`);
+writeFileSync(join(outDir, 'manifest-full.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+console.log(`Wrote manifest-full.json (${chunks} chunks, ${all.length} bytes).`);

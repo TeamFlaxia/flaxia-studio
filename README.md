@@ -28,8 +28,11 @@ Open <http://localhost:4173>.
 The editor works immediately. The Linux panel needs an image:
 
 ```bash
-# Option A: use a prebuilt Debian + gcc image for local evaluation (~440 MB)
-npm run fetch:linux-demo
+# Option A: lightweight Alpine Python image for fast local boots (~145 MB)
+npm run fetch:linux-lite
+
+# Optional: the full Debian + gcc image (~440 MB)
+npm run fetch:linux-full
 
 # Option B: build the Flaxia image (Docker + buildx + c2w required)
 npm run build:linux
@@ -47,9 +50,10 @@ npm run lint           # Biome
 npm run typecheck      # tsc --noEmit
 npm test               # node:test (path, zip, workspace)
 npm run test:e2e       # Playwright workspace smoke test against the preview server
-npm run test:linux     # Boot the default image and run gcc in the browser
+npm run test:linux     # Boot the full Debian image and run gcc in the browser
 npm run test:csp       # Strict CSP smoke test against scripts/serve-dist.mjs (port 4174)
-npm run fetch:linux-demo
+npm run fetch:linux-lite
+npm run fetch:linux-full
 npm run build:linux
 npm run verify:linux
 ```

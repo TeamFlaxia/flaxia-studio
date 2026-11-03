@@ -61,10 +61,10 @@ export class LinuxRuntime {
     return this.manifestSource;
   }
 
-  private manifestSource = '/linux/manifest.json';
+  private manifestSource = 'auto';
 
   setManifestUrl(url: string): void {
-    this.manifestSource = url.trim() || '/linux/manifest.json';
+    this.manifestSource = url.trim() || 'auto';
     this.image = null;
     this.setState('idle', 'Linux', 'Not booted');
   }
@@ -99,7 +99,7 @@ export class LinuxRuntime {
 
     this.setState('loading', 'Linux', 'Loading manifest…');
     try {
-      const image = await loadManifest(this.manifestSource);
+      const image = await this.resolveImage();
       this.image = image;
       this.label = image.label ?? 'Linux';
       this.setState('loading', this.label, 'Starting Linux…');
@@ -197,6 +197,20 @@ export class LinuxRuntime {
         files: files ?? [],
       });
     });
+  }
+
+  private async resolveImage(): Promise<ResolvedLinuxImage> {
+    if (this.manifestSource !== 'auto') return loadManifest(this.manifestSource);
+    const candidates = ['linux/manifest.json', 'linux/manifest-lite.json', 'linux/manifest-full.json'];
+    let lastError: Error | null = null;
+    for (const candidate of candidates) {
+      try {
+        return await loadManifest(candidate);
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+      }
+    }
+    throw lastError ?? new Error('No Linux image manifest was found.');
   }
 
   private ensureWorker(): Worker {

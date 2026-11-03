@@ -3,6 +3,20 @@ import { chromium } from 'playwright';
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 page.on('pageerror', (err) => console.log('[pageerror]', err.message));
+await page.addInitScript(() => {
+  localStorage.setItem(
+    'flaxia_studio_settings',
+    JSON.stringify({
+      linuxManifestUrl: 'linux/manifest-full.json',
+      theme: 'light',
+      fontSize: 13,
+      tabSize: 2,
+      wordWrap: false,
+      autoSave: true,
+      minimap: true,
+    }),
+  );
+});
 await page.goto('http://localhost:4173/', { waitUntil: 'networkidle', timeout: 60000 });
 await page.locator('.vm-pill').click();
 for (let i = 0; i < 120; i++) {

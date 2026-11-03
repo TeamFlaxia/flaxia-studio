@@ -1547,10 +1547,42 @@ export class App implements ShellHostish {
         }),
       ),
     );
+    const normalizeManifest = (value: string) => value.replace(/^\//, '');
+    const manifestOptions = [
+      { value: 'auto', label: 'Auto (production → lite → full)' },
+      { value: 'linux/manifest-lite.json', label: 'Lite — Alpine Python (fast, ~145 MB)' },
+      { value: 'linux/manifest-full.json', label: 'Full — Debian gcc (compile, ~420 MB)' },
+      { value: 'linux/manifest.json', label: 'Production — built Flaxia image' },
+      { value: 'custom', label: 'Custom URL' },
+    ];
+    const currentManifest = normalizeManifest(this.settings.linuxManifestUrl);
+    const knownManifest = manifestOptions.some((option) => option.value === currentManifest);
+    const manifestSelect = el(
+      'select',
+      { class: 'select' },
+      manifestOptions.map((option) =>
+        el('option', {
+          text: option.label,
+          attrs: {
+            value: option.value,
+            selected: option.value === (knownManifest ? currentManifest : 'custom'),
+          },
+        }),
+      ),
+    );
     const manifest = el('input', {
       class: 'input',
       type: 'text',
-      attrs: { value: this.settings.linuxManifestUrl, spellcheck: 'false' },
+      attrs: {
+        value: knownManifest ? '' : currentManifest,
+        placeholder: 'https://…/manifest.json',
+        spellcheck: 'false',
+      },
+    });
+    manifest.disabled = manifestSelect.value !== 'custom';
+    manifestSelect.addEventListener('change', () => {
+      manifest.disabled = manifestSelect.value !== 'custom';
+      if (!manifest.disabled) manifest.focus();
     });
 
     const switches = new Map<string, HTMLButtonElement>();
@@ -1604,12 +1636,13 @@ export class App implements ShellHostish {
           switchRow('minimap', 'Minimap', 'Show the Monaco minimap', this.settings.minimap),
         ]),
       ]),
-      el('label', { class: 'field' }, [
-        el('span', { class: 'field-label', text: 'Linux image manifest' }),
+      el('div', { class: 'field' }, [
+        el('span', { class: 'field-label', text: 'Linux image' }),
+        manifestSelect,
         manifest,
         el('span', {
           class: 'field-hint',
-          text: 'Relative to this app. Build a Debian image with `npm run build:linux`, or use /linux/manifest.json.',
+          text: 'Auto prefers a production build, then the lightweight Alpine image, then the full Debian gcc image. Paths are relative to this app.',
         }),
       ]),
     ]);
@@ -1632,7 +1665,8 @@ export class App implements ShellHostish {
       wordWrap: switches.get('wordWrap')?.getAttribute('aria-checked') === 'true',
       autoSave: switches.get('autoSave')?.getAttribute('aria-checked') === 'true',
       minimap: switches.get('minimap')?.getAttribute('aria-checked') === 'true',
-      linuxManifestUrl: manifest.value.trim() || '/linux/manifest.json',
+      linuxManifestUrl:
+        manifestSelect.value === 'custom' ? manifest.value.trim() || 'auto' : manifestSelect.value,
     };
     this.settings = next;
     this.saveSettings();

@@ -17,7 +17,7 @@ export const DEFAULT_SETTINGS: Settings = {
   wordWrap: false,
   autoSave: true,
   minimap: true,
-  linuxManifestUrl: '/linux/manifest.json',
+  linuxManifestUrl: 'auto',
 };
 
 export function loadSettings(): Settings {

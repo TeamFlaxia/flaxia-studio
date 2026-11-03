@@ -47,9 +47,11 @@ Point **Settings → Linux image manifest** at the manifest URL.
 
 ## Local demo
 
-`npm run fetch:linux-demo` downloads the prebuilt Debian+gcc example
-(~440 MB) from `ktock.github.io` and writes a manifest. This is useful for
-validating compile/run without Docker. Do not use it as a production image.
+`npm run fetch:linux-lite` downloads the Alpine Python image (~145 MB) and
+writes `manifest-lite.json`. `npm run fetch:linux-full` downloads the Debian+gcc
+example (~440 MB) and writes `manifest-full.json`. Both are for local validation;
+do not use them as production images. The default image setting is `auto`,
+which prefers a production build, then lite, then full.
 
 ## Licenses
 

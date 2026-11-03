@@ -19,7 +19,9 @@
     "test:linux": "node scripts/linux-gcc.mjs",
     "serve:dist": "node scripts/serve-dist.mjs dist",
     "fetch:linux-demo": "node scripts/fetch-linux-demo.mjs",
-    "test:csp": "node scripts/csp-smoke.mjs"
+    "test:csp": "node scripts/csp-smoke.mjs",
+    "fetch:linux-full": "node scripts/fetch-linux-demo.mjs",
+    "fetch:linux-lite": "node scripts/fetch-linux-lite.mjs"
   },
   "dependencies": {
     "@bjorn3/browser_wasi_shim": "^0.4.2",
