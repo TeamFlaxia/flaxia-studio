@@ -108,3 +108,49 @@ Normal commands run in one persistent session (`/workspace/.flaxia/session.sh`)
 and cost roughly 0.5–1 s after boot. gcc is still limited by CPU emulation.
 container2wasm's JIT backend (`c2w --to-js`, QEMU Wasm) would need a different
 prebuilt artifact and Emscripten loader; it is not mixed into this WASI image.
+
+## Docker prerequisites (Debian 13)
+
+This host does not currently have Docker, Podman, or Buildah. Debian 13 provides
+Docker 26 and the Buildx plugin in its own repository:
+
+```bash
+sudo apt update
+sudo apt install -y docker.io docker-buildx
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+```
+
+Log out and back in (or run `newgrp docker`) so the group membership applies,
+then verify:
+
+```bash
+docker version
+docker buildx version
+docker run --rm hello-world
+```
+
+The `docker.io` package is sufficient for this project's `docker build`
+pipeline. If you prefer the upstream Docker repository, install
+`docker-ce`, `docker-ce-cli`, `containerd.io`, `docker-buildx-plugin`, and
+optionally `docker-ce-rootless-extras`. Rootless Docker is possible on this
+host: `/etc/subuid` and `/etc/subgid` are already configured for the user.
+
+Install container2wasm (v0.8.4 is the pinned version):
+
+```bash
+cd /tmp
+curl -LO https://github.com/container2wasm/container2wasm/releases/download/v0.8.4/container2wasm-v0.8.4-linux-amd64.tar.gz
+tar -xzf container2wasm-v0.8.4-linux-amd64.tar.gz c2w c2w-net
+install -m 0755 c2w c2w-net ~/.local/bin/
+c2w --version
+```
+
+Then build the image:
+
+```bash
+npm run build:linux
+```
+
+JIT (`c2w --to-js`, QEMU Wasm) needs an emscripten/QEMU artifact and a separate
+runtime loader; it is not built by `npm run build:linux` yet.
