@@ -45,8 +45,9 @@
 2. The worker builds a nested `Map` and exposes it as a
    `PreopenDirectory('/workspace', …)`.
 3. container2wasm's guest init mounts it over virtio-9p at `/workspace`.
-4. The command wrapper copies `/workspace` into `/tmp/flaxia-work`, runs the
-   command there (so executable bits work), then copies the result back.
+4. The command wrapper copies `/workspace` into `/tmp/flaxia-work`, applies
+   `chmod -R u+rwx` (the virtio-9p preopen does not carry POSIX mode bits), runs
+   the command there, then copies the result back.
 5. The worker walks the preopen directory. UTF-8 files are returned as text;
    everything else is base64-encoded with `binary: true` (≤ 20 MiB each).
 6. `App.syncGuestFiles()` applies creates/updates/deletes to IndexedDB, stores

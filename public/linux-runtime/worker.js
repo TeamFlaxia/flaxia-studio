@@ -129,6 +129,9 @@ async function run(message) {
     const shellCommand = [
       `rm -rf ${work} && mkdir -p ${work}`,
       `cp -a /workspace/. ${work}/ 2>/dev/null`,
+      // The preopen directory does not carry POSIX mode bits. Give the
+      // temporary copy normal permissions so compiled binaries can execute.
+      `chmod -R u+rwx ${work} 2>/dev/null`,
       `cd ${shellQuote(cwd ? `${work}/${cwd}` : work)} 2>/dev/null || cd ${work}`,
       command,
       '__flaxia_status=$?',

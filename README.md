@@ -53,6 +53,7 @@ npm run typecheck      # tsc --noEmit
 npm test               # node:test (path, zip, workspace)
 npm run test:e2e       # Playwright workspace smoke test against the preview server
 npm run test:linux     # Boot the full Debian image and run gcc in the browser
+npm run test:exec      # Compile and run a.out as two separate commands
 npm run test:net       # Boot Lite, run `fetch`, and verify the Fetch proxy
 npm run test:manifest  # Legacy '/linux/manifest.json' settings fall back to auto
 npm run test:csp       # Strict CSP smoke test against scripts/serve-dist.mjs (port 4174)
@@ -116,7 +117,9 @@ does not block them.
 - Desktop Chromium is the primary target. Firefox may work without the Linux
   panel; Safari's COEP/worker behavior is not validated.
 - The MVP uses command-scoped workspace sync, not a live shared filesystem.
-  Long-running interactive TUI programs are not supported.
+  The guest preopen does not persist POSIX mode bits, so each command copies the
+  workspace to `/tmp/flaxia-work` and restores execute bits there. Long-running
+  interactive TUI programs are not supported.
 - The terminal panel is hidden on narrow mobile layouts; the editor and mobile
   sidebar drawer remain available.
 - container2wasm is experimental and CPU emulation is slow. The demo image boots
