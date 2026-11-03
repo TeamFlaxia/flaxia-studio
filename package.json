@@ -25,7 +25,8 @@
     "test:net": "node scripts/linux-net.mjs",
     "test:manifest": "node scripts/manifest-fallback.mjs",
     "test:exec": "node scripts/linux-exec.mjs",
-    "test:session": "node scripts/session-test.mjs"
+    "test:session": "node scripts/session-test.mjs",
+    "test:menu": "node scripts/monaco-menu-test.mjs"
   },
   "dependencies": {
     "@bjorn3/browser_wasi_shim": "^0.4.2",

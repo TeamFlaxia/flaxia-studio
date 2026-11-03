@@ -370,3 +370,81 @@ function defineThemes(): void {
     },
   });
 }
+
+const FLAXIA_MENU_CSS = `
+:host {
+  --vscode-menu-background: #ffffff;
+  --vscode-menu-foreground: #0f172a;
+  --vscode-menu-border: #e2e8f0;
+  --vscode-menu-selectionBackground: #f1f5f9;
+  --vscode-menu-selectionForeground: #0f172a;
+  --vscode-menu-selectionBorder: #10b981;
+  --vscode-menu-separatorBackground: #e2e8f0;
+  --vscode-cornerRadius-large: 10px;
+  --vscode-cornerRadius-medium: 6px;
+  --vscode-strokeThickness: 1px;
+  --vscode-shadow-lg: 0 16px 40px rgba(9, 9, 11, 0.14), 0 4px 12px rgba(9, 9, 11, 0.06);
+  --vscode-widget-shadow: rgba(9, 9, 11, 0.14);
+}
+:host(.flaxia-dark) {
+  --vscode-menu-background: #242c3d;
+  --vscode-menu-foreground: #f8fafc;
+  --vscode-menu-border: #2e374d;
+  --vscode-menu-selectionBackground: #2a3246;
+  --vscode-menu-selectionForeground: #f8fafc;
+  --vscode-menu-selectionBorder: #34d399;
+  --vscode-menu-separatorBackground: #2e374d;
+  --vscode-shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.35);
+  --vscode-widget-shadow: rgba(0, 0, 0, 0.5);
+}
+.monaco-menu-container .monaco-scrollable-element {
+  background: var(--vscode-menu-background) !important;
+  border: var(--vscode-strokeThickness) solid var(--vscode-menu-border) !important;
+  border-radius: var(--vscode-cornerRadius-large) !important;
+  box-shadow: var(--vscode-shadow-lg) !important;
+  color: var(--vscode-menu-foreground) !important;
+}
+.monaco-menu {
+  border: 0 !important;
+  font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif !important;
+}
+.monaco-menu .monaco-action-bar.vertical .action-label,
+.monaco-menu .monaco-action-bar.vertical .keybinding,
+.monaco-menu .monaco-action-bar.vertical .submenu-indicator {
+  font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif !important;
+  color: var(--vscode-menu-foreground) !important;
+}
+.monaco-menu .monaco-action-bar.vertical .action-menu-item:hover,
+.monaco-menu .monaco-action-bar.vertical .action-menu-item:focus,
+.monaco-menu .monaco-action-bar.vertical .action-item.focused > .action-menu-item {
+  background: var(--vscode-menu-selectionBackground) !important;
+  color: var(--vscode-menu-selectionForeground) !important;
+}
+.monaco-menu .monaco-action-bar.vertical .action-label.separator {
+  border-bottom: 1px solid var(--vscode-menu-separatorBackground) !important;
+  background: transparent !important;
+}
+`;
+
+export function installMonacoShadowStyles(): void {
+  if (typeof document === 'undefined') return;
+  const scan = () => {
+    const dark = document.documentElement.dataset.theme === 'dark';
+    for (const host of document.querySelectorAll<HTMLElement>('.shadow-root-host')) {
+      host.classList.toggle('flaxia-dark', dark);
+      if (host.dataset.flaxiaMenuStyles === 'true') continue;
+      const root = host.shadowRoot;
+      if (!root) continue;
+      const style = document.createElement('style');
+      style.dataset.flaxiaMenu = 'true';
+      style.textContent = FLAXIA_MENU_CSS;
+      root.appendChild(style);
+      host.dataset.flaxiaMenuStyles = 'true';
+    }
+  };
+  scan();
+  const observer = new MutationObserver(scan);
+  observer.observe(document.body, { childList: true, subtree: true });
+  window.addEventListener('flaxia:theme', scan);
+  window.setInterval(scan, 1000);
+}

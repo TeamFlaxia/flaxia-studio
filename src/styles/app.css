@@ -1783,3 +1783,87 @@ button.status-item:hover {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ------------------------------------------------------------
+   Monaco context menu
+   Monaco 0.57 renders the context menu without a usable surface
+   background unless the host supplies the menu colors. Keep it on
+   the Flaxia surface tokens so it reads as a real menu instead of
+   floating text over the editor.
+   ------------------------------------------------------------ */
+.monaco-menu-container {
+  background: var(--bg-elevated) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-md) !important;
+  box-shadow: var(--shadow-lg) !important;
+  color: var(--text-primary) !important;
+  overflow: hidden !important;
+}
+
+.monaco-menu-container .monaco-menu,
+.monaco-menu-container .monaco-action-bar,
+.monaco-menu-container .actions-container {
+  background: transparent !important;
+  color: var(--text-primary) !important;
+}
+
+.monaco-menu-container .action-label,
+.monaco-menu-container .keybinding,
+.monaco-menu-container .submenu-indicator {
+  color: var(--text-secondary) !important;
+  font-family: var(--font-sans) !important;
+}
+
+.monaco-menu-container .action-item:hover,
+.monaco-menu-container .action-item.focused,
+.monaco-menu-container .action-menu-item:hover,
+.monaco-menu-container .action-menu-item:focus {
+  background: var(--bg-active) !important;
+  color: var(--text-primary) !important;
+}
+
+.monaco-menu-container .action-item:hover .action-label,
+.monaco-menu-container .action-item.focused .action-label,
+.monaco-menu-container .action-item:hover .keybinding,
+.monaco-menu-container .action-item.focused .keybinding {
+  color: var(--text-primary) !important;
+}
+
+.monaco-menu-container .action-label.separator {
+  background: var(--border) !important;
+  border: 0 !important;
+}
+
+.monaco-menu-container .monaco-menu .monaco-action-bar.vertical .action-menu-item {
+  border-radius: var(--radius-sm);
+}
+
+/* Monaco context menus render inside a body-level shadow root, so the
+   standalone theme's --vscode-* variables are not on the editor container.
+   Provide the menu variables at the document root for both themes. */
+:root {
+  --vscode-menu-background: #ffffff;
+  --vscode-menu-foreground: #0f172a;
+  --vscode-menu-border: #e2e8f0;
+  --vscode-menu-selectionBackground: #f1f5f9;
+  --vscode-menu-selectionForeground: #0f172a;
+  --vscode-menu-selectionBorder: #10b981;
+  --vscode-menu-separatorBackground: #e2e8f0;
+  --vscode-cornerRadius-large: 12px;
+  --vscode-cornerRadius-medium: 6px;
+  --vscode-strokeThickness: 1px;
+  --vscode-shadow-lg: 0 16px 40px rgba(9, 9, 11, 0.14), 0 4px 12px rgba(9, 9, 11, 0.06);
+  --vscode-widget-shadow: rgba(9, 9, 11, 0.14);
+}
+
+:root[data-theme="dark"] {
+  --vscode-menu-background: #242c3d;
+  --vscode-menu-foreground: #f8fafc;
+  --vscode-menu-border: #2e374d;
+  --vscode-menu-selectionBackground: #2a3246;
+  --vscode-menu-selectionForeground: #f8fafc;
+  --vscode-menu-selectionBorder: #34d399;
+  --vscode-menu-separatorBackground: #2e374d;
+  --vscode-shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.35);
+  --vscode-widget-shadow: rgba(0, 0, 0, 0.5);
+}

@@ -71,6 +71,7 @@ npm run test:e2e       # Playwright workspace smoke test against the preview ser
 npm run test:linux     # Boot the full Debian image and run gcc in the browser
 npm run test:exec      # Compile and run a.out as two separate commands
 npm run test:session   # Verify the persistent session (gcc → a.out)
+npm run test:menu      # Verify Monaco context menu surfaces in light/dark
 npm run test:net       # Boot Lite, run `fetch`, and verify the Fetch proxy
 npm run test:manifest  # Legacy '/linux/manifest.json' settings fall back to auto
 npm run test:csp       # Strict CSP smoke test against scripts/serve-dist.mjs (port 4174)

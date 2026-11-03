@@ -1,4 +1,4 @@
-import { EditorManager } from './editor/monaco';
+import { EditorManager, installMonacoShadowStyles } from './editor/monaco';
 import { base64ByteLength, base64ToBytes } from './fs/base64';
 import { basename, dirname, isPathInside, joinPath, languageForPath } from './fs/path';
 import type { WorkspaceEntry } from './fs/workspace';
@@ -102,6 +102,7 @@ export class App implements ShellHostish {
     setTheme(this.settings.theme);
     this.root = root;
     this.buildShell();
+    installMonacoShadowStyles();
     this.editor.init({
       onChange: (path) => this.handleEditorChange(path),
       onCursor: (position) => {
