@@ -51,6 +51,7 @@ npm run typecheck      # tsc --noEmit
 npm test               # node:test (path, zip, workspace)
 npm run test:e2e       # Playwright workspace smoke test against the preview server
 npm run test:linux     # Boot the full Debian image and run gcc in the browser
+npm run test:net       # Boot Lite, run `fetch`, and verify the Fetch proxy
 npm run test:csp       # Strict CSP smoke test against scripts/serve-dist.mjs (port 4174)
 npm run fetch:linux-lite
 npm run fetch:linux-full
