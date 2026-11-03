@@ -10,16 +10,79 @@
  * filesystem channel. Interactive full-screen programs are out of scope for
  * the MVP.
  */
-import { Directory, File, PreopenDirectory, WASI, WASIProcExit } from './browser_wasi_shim/index.js';
+import {
+  Directory,
+  File,
+  OpenFile,
+  PreopenDirectory,
+  WASI,
+  WASIProcExit,
+} from './browser_wasi_shim/index.js';
+import {
+  Ciovec,
+  EVENTTYPE_CLOCK,
+  EVENTTYPE_FD_READ,
+  Event,
+  Iovec,
+  Subscription,
+} from './browser_wasi_shim/wasi_defs.js';
 
 const IMAGE_CACHE = 'flaxia-studio-linux-v1';
+const FETCH_SCRIPT = String.raw`import socket, ssl, sys, urllib.parse
+url = sys.argv[1]
+u = urllib.parse.urlsplit(url)
+host = u.hostname
+port = u.port or (443 if u.scheme == "https" else 80)
+path = (u.path or "/") + (("?" + u.query) if u.query else "")
+s = socket.create_connection(("192.168.127.253", 80), 10)
+if u.scheme == "https":
+    s.sendall(("CONNECT " + host + ":" + str(port) + " HTTP/1.1\r\nHost: " + host + ":" + str(port) + "\r\n\r\n").encode())
+    head = b""
+    while b"\r\n\r\n" not in head:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        head += chunk
+    s = ssl._create_unverified_context().wrap_socket(s, server_hostname=host)
+else:
+    s.sendall(("GET " + url + " HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n\r\n").encode())
+s.sendall(("GET " + path + " HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\nUser-Agent: FlaxiaStudio\r\n\r\n").encode())
+data = b""
+while True:
+    chunk = s.recv(65536)
+    if not chunk:
+        break
+    data += chunk
+s.close()
+head, _, body = data.partition(b"\r\n\r\n")
+if b"transfer-encoding: chunked" in head.lower():
+    out = b""
+    while body:
+        line, _, rest = body.partition(b"\r\n")
+        try:
+            size = int(line.split(b";")[0], 16)
+        except ValueError:
+            break
+        if size == 0:
+            break
+        out += rest[:size]
+        body = rest[size + 2 :]
+    body = out
+sys.stdout.buffer.write(body)
+`;
+
 let busy = false;
 let imageCacheEntry = { key: null, bytes: null };
 let moduleCacheEntry = { key: null, module: null };
+let socketState = null;
 
 self.onmessage = (event) => {
   const message = event.data;
   if (!message || typeof message !== 'object') return;
+  if ((message.type === 'net-init' || message.type === 'init') && message.buf instanceof SharedArrayBuffer) {
+    registerSocketBuffer(message.buf);
+    return;
+  }
   if (message.type === 'run') {
     if (busy) {
       post({ type: 'error', message: 'A Linux process is already running.' });
@@ -47,12 +110,18 @@ async function run(message) {
     }
 
     const files = Array.isArray(message.files) ? message.files : [];
-    const workspaceDir = buildWorkspaceDirectory(files);
-    const preopen = new PreopenDirectory('/workspace', workspaceDir.contents);
 
+    let cert = null;
+    if (message.network && socketState) {
+      try {
+        cert = await recvCert(20000);
+      } catch {
+        cert = null;
+      }
+    }
+    const activeNetwork = Boolean(cert && cert.byteLength > 0);
     const output = new OutputFd((text) => post({ type: 'output', text }));
-    const stdin = new File(new Uint8Array(0));
-    const fds = [stdin, output, output, preopen];
+    const stdin = new OpenFile(new File(new Uint8Array(0)));
 
     const cwd = normalizeGuestPath(message.cwd ?? '');
     const command = message.command ?? 'true';
@@ -63,11 +132,26 @@ async function run(message) {
       `cd ${shellQuote(cwd ? `${work}/${cwd}` : work)} 2>/dev/null || cd ${work}`,
       command,
       '__flaxia_status=$?',
-      'find /workspace -mindepth 1 -delete 2>/dev/null',
+      `find /workspace -mindepth 1 ! -path '/workspace/.flaxia' ! -path '/workspace/.flaxia/*' -delete 2>/dev/null`,
       `cp -a ${work}/. /workspace/ 2>/dev/null`,
       'exit $__flaxia_status',
     ].join('\n');
-    const args = ['arg0', '-entrypoint', '/bin/sh', '--', '-c', shellCommand];
+    const workspaceDir = buildWorkspaceDirectory([
+      ...files,
+      { path: '.flaxia/run.sh', content: shellCommand },
+      { path: '.flaxia/fetch.py', content: FETCH_SCRIPT },
+    ]);
+    const preopen = new PreopenDirectory('/workspace', workspaceDir.contents);
+    let fds;
+    if (activeNetwork) {
+      const certDir = new PreopenDirectory('/.wasmenv', new Map([['proxy.crt', new File(cert)]]));
+      fds = [stdin, output, output, certDir, undefined, undefined, preopen];
+    } else {
+      fds = [stdin, output, output, preopen];
+    }
+    const args = ['arg0'];
+    if (activeNetwork) args.push('--net=socket=listenfd=4', '--mac', genMac(), '-no-stdin');
+    args.push('-entrypoint', '/bin/sh', '--', '/workspace/.flaxia/run.sh');
     const env = [
       'HOME=/workspace',
       'USER=flaxia',
@@ -76,8 +160,20 @@ async function run(message) {
       'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
       'LANG=C.UTF-8',
     ];
+    if (activeNetwork) {
+      env.push(
+        'SSL_CERT_FILE=/.wasmenv/proxy.crt',
+        'https_proxy=http://192.168.127.253:80',
+        'http_proxy=http://192.168.127.253:80',
+        'HTTPS_PROXY=http://192.168.127.253:80',
+        'HTTP_PROXY=http://192.168.127.253:80',
+      );
+    }
 
     const wasi = new WASI(args, env, fds, { debug: false });
+    if (activeNetwork) {
+      installSocketHooks(wasi, 4, 5);
+    }
     let exitCode = 0;
     try {
       const instantiated = await WebAssembly.instantiate(module, {
@@ -250,6 +346,7 @@ function collectFiles(preopen) {
   const walk = (contents, prefix) => {
     for (const [name, entry] of contents) {
       const path = prefix ? `${prefix}/${name}` : name;
+      if (path === '.flaxia' || path.startsWith('.flaxia/')) continue;
       if (entry instanceof Directory) {
         walk(entry.contents, path);
       } else if (entry && entry.data instanceof Uint8Array) {
@@ -265,6 +362,238 @@ function collectFiles(preopen) {
   };
   walk(preopen.dir.contents, '');
   return files;
+}
+
+// ------------------------------------------------------------
+// container2wasm browser Fetch networking
+// ------------------------------------------------------------
+function registerSocketBuffer(shared) {
+  socketState = {
+    ctrl: new Int32Array(shared, 0, 1),
+    status: new Int32Array(shared, 4, 1),
+    len: new Int32Array(shared, 8, 1),
+    data: new Uint8Array(shared, 12),
+  };
+}
+
+function recvCert(timeoutMs) {
+  if (!socketState) return Promise.reject(new Error('Network stack is not initialized.'));
+  return new Promise((resolve, reject) => {
+    const deadline = performance.now() + timeoutMs;
+    let buffer = new Uint8Array(0);
+    const getCert = () => {
+      socketState.ctrl[0] = 0;
+      post({ type: 'recv_cert' });
+      Atomics.wait(socketState.ctrl, 0, 0);
+      if (socketState.status[0] < 0) {
+        if (performance.now() > deadline) {
+          reject(new Error('Timed out waiting for the browser proxy certificate.'));
+          return;
+        }
+        setTimeout(getCert, 100);
+        return;
+      }
+      const length = socketState.len[0];
+      buffer = appendData(buffer, socketState.data.slice(0, length));
+      if (socketState.status[0] === 0) {
+        resolve(buffer);
+      } else {
+        setTimeout(getCert, 0);
+      }
+    };
+    getCert();
+  });
+}
+
+function sockAccept() {
+  if (!socketState) return false;
+  socketState.ctrl[0] = 0;
+  post({ type: 'accept' });
+  Atomics.wait(socketState.ctrl, 0, 0);
+  return socketState.data[0] === 1;
+}
+
+function sockSend(data) {
+  if (!socketState) return -1;
+  socketState.ctrl[0] = 0;
+  post({ type: 'send', buf: data });
+  Atomics.wait(socketState.ctrl, 0, 0);
+  return socketState.status[0];
+}
+
+function sockRecv(length) {
+  if (!socketState) return new Uint8Array(0);
+  socketState.ctrl[0] = 0;
+  post({ type: 'recv', len: length });
+  Atomics.wait(socketState.ctrl, 0, 0);
+  if (socketState.status[0] < 0) return null;
+  return socketState.data.slice(0, socketState.len[0]);
+}
+
+function sockWaitForReadable(timeoutSeconds) {
+  if (!socketState) return false;
+  socketState.ctrl[0] = 0;
+  post({ type: 'recv-is-readable', timeout: timeoutSeconds });
+  Atomics.wait(socketState.ctrl, 0, 0);
+  if (socketState.status[0] < 0) return null;
+  return socketState.data[0] === 1;
+}
+
+function genMac() {
+  return '02:XX:XX:XX:XX:XX'.replace(/X/g, () => '0123456789ABCDEF'.charAt(Math.floor(Math.random() * 16)));
+}
+
+function appendData(first, second) {
+  const merged = new Uint8Array(first.byteLength + second.byteLength);
+  merged.set(first, 0);
+  merged.set(second, first.byteLength);
+  return merged;
+}
+
+function sleep(milliseconds) {
+  const signal = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(signal, 0, 0, milliseconds);
+}
+
+function installSocketHooks(wasi, listenfd, connfd) {
+  const ERRNO_INVAL = 28;
+  const ERRNO_AGAIN = 6;
+  let connfdUsed = false;
+
+  const fdClose = wasi.wasiImport.fd_close;
+  wasi.wasiImport.fd_close = (fd) => {
+    if (fd === connfd) {
+      connfdUsed = false;
+      return 0;
+    }
+    return fdClose.apply(wasi.wasiImport, [fd]);
+  };
+
+  const fdRead = wasi.wasiImport.fd_read;
+  wasi.wasiImport.fd_read = (fd, iovsPtr, iovsLen, nreadPtr) => {
+    if (fd === connfd) return wasi.wasiImport.sock_recv(fd, iovsPtr, iovsLen, 0, nreadPtr, 0);
+    return fdRead.apply(wasi.wasiImport, [fd, iovsPtr, iovsLen, nreadPtr]);
+  };
+
+  const fdWrite = wasi.wasiImport.fd_write;
+  wasi.wasiImport.fd_write = (fd, iovsPtr, iovsLen, nwrittenPtr) => {
+    if (fd === connfd) return wasi.wasiImport.sock_send(fd, iovsPtr, iovsLen, 0, nwrittenPtr);
+    return fdWrite.apply(wasi.wasiImport, [fd, iovsPtr, iovsLen, nwrittenPtr]);
+  };
+
+  const fdFdstatGet = wasi.wasiImport.fd_fdstat_get;
+  wasi.wasiImport.fd_fdstat_get = (fd, fdstatPtr) => {
+    if (fd === listenfd || (fd === connfd && connfdUsed)) {
+      const view = new DataView(wasi.inst.exports.memory.buffer);
+      view.setUint8(fdstatPtr, 6);
+      view.setUint8(fdstatPtr + 1, 2);
+      return 0;
+    }
+    return fdFdstatGet.apply(wasi.wasiImport, [fd, fdstatPtr]);
+  };
+
+  const fdPrestatGet = wasi.wasiImport.fd_prestat_get;
+  wasi.wasiImport.fd_prestat_get = (fd, prestatPtr) => {
+    if (fd === listenfd || fd === connfd) {
+      const view = new DataView(wasi.inst.exports.memory.buffer);
+      view.setUint8(prestatPtr, 1);
+      return 0;
+    }
+    return fdPrestatGet.apply(wasi.wasiImport, [fd, prestatPtr]);
+  };
+
+  wasi.wasiImport.sock_accept = (fd, _flags, fdPtr) => {
+    if (fd !== listenfd) return ERRNO_INVAL;
+    if (connfdUsed) return ERRNO_INVAL;
+    if (!sockAccept()) return ERRNO_AGAIN;
+    connfdUsed = true;
+    new DataView(wasi.inst.exports.memory.buffer).setUint32(fdPtr, connfd, true);
+    return 0;
+  };
+
+  wasi.wasiImport.sock_send = (fd, iovsPtr, iovsLen, _flags, nwrittenPtr) => {
+    if (fd !== connfd) return ERRNO_INVAL;
+    const view = new DataView(wasi.inst.exports.memory.buffer);
+    const bytes = new Uint8Array(wasi.inst.exports.memory.buffer);
+    const iovecs = Ciovec.read_bytes_array(view, iovsPtr, iovsLen);
+    let total = 0;
+    for (const iovec of iovecs) {
+      const data = bytes.slice(iovec.buf, iovec.buf + iovec.buf_len);
+      if (data.byteLength === 0) continue;
+      if (sockSend(data) < 0) return ERRNO_INVAL;
+      total += data.byteLength;
+    }
+    view.setUint32(nwrittenPtr, total, true);
+    return 0;
+  };
+
+  wasi.wasiImport.sock_recv = (fd, iovsPtr, iovsLen, _flags, nreadPtr) => {
+    if (fd !== connfd) return ERRNO_INVAL;
+    const readable = sockWaitForReadable();
+    if (readable === null) return ERRNO_INVAL;
+    if (readable === false) return ERRNO_AGAIN;
+    const view = new DataView(wasi.inst.exports.memory.buffer);
+    const bytes = new Uint8Array(wasi.inst.exports.memory.buffer);
+    const iovecs = Iovec.read_bytes_array(view, iovsPtr, iovsLen);
+    let total = 0;
+    for (const iovec of iovecs) {
+      if (iovec.buf_len === 0) continue;
+      const data = sockRecv(iovec.buf_len);
+      if (data === null) return ERRNO_INVAL;
+      bytes.set(data, iovec.buf);
+      total += data.byteLength;
+    }
+    view.setUint32(nreadPtr, total, true);
+    return 0;
+  };
+
+  wasi.wasiImport.sock_shutdown = (fd) => {
+    if (fd === connfd) connfdUsed = false;
+    return 0;
+  };
+
+  wasi.wasiImport.poll_oneoff = (inPtr, outPtr, subscriptions, neventsPtr) => {
+    if (subscriptions === 0) return ERRNO_INVAL;
+    const view = new DataView(wasi.inst.exports.memory.buffer);
+    const subs = [];
+    for (let index = 0; index < subscriptions; index += 1) {
+      subs.push(Subscription.read_bytes(view, inPtr + 48 * index));
+    }
+    const events = [];
+    const clocks = [];
+    for (let index = 0; index < subs.length; index += 1) {
+      const sub = subs[index];
+      if (sub.eventtype === EVENTTYPE_FD_READ) {
+        const fd = view.getUint32(inPtr + 48 * index + 16, true);
+        if (fd === 0) {
+          // Command mode has no interactive stdin. Do not report EOF as a
+          // readable event; the guest would treat it as a closed terminal.
+        } else if (fd === connfd) {
+          const readable = sockWaitForReadable(0.002);
+          if (readable === null) return ERRNO_INVAL;
+          if (readable) events.push(new Event(sub.userdata, 0, sub.eventtype));
+        } else {
+          return ERRNO_INVAL;
+        }
+      } else if (sub.eventtype === 2) {
+        events.push(new Event(sub.userdata, 0, sub.eventtype));
+      } else if (sub.eventtype === EVENTTYPE_CLOCK) {
+        clocks.push(sub);
+      } else {
+        return ERRNO_INVAL;
+      }
+    }
+    if (events.length === 0 && clocks.length > 0) {
+      const waitMs = Math.min(100, ...clocks.map((sub) => Math.max(0, Number(sub.timeout) / 1_000_000)));
+      sleep(waitMs);
+      for (const sub of clocks) events.push(new Event(sub.userdata, 0, sub.eventtype));
+    }
+    for (let index = 0; index < events.length; index += 1) {
+      events[index].write_bytes(view, outPtr + 32 * index);
+    }
+    view.setUint32(neventsPtr, events.length, true);
+    return 0;
+  };
 }
 
 class OutputFd {

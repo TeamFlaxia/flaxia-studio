@@ -84,9 +84,11 @@ R2 / static assets
   binaries can execute, then the result is mirrored back.
 - Only UTF-8 text files ≤ 2 MiB are mirrored. Binary build products stay inside
   the VM. Empty directories are not preserved by command-mode sync.
-- Networking is disabled in the MVP. The browser `c2w-net-proxy` path is the
-  next integration step; the offline image still runs `gcc`, `make`, `git`,
-  and local tests.
+- The browser Fetch proxy (`c2w-net-proxy`) is available for commands that need
+  the network (`fetch`, `curl`, `apk`, `pip`, URLs, …). It restarts Linux with
+  DHCP, so a network command takes roughly 20–30 s on the current WASI image.
+  Normal offline commands stay fast. Disable it in Settings for a pure offline
+  session.
 
 See [`docs/architecture.md`](docs/architecture.md),
 [`docs/linux-image.md`](docs/linux-image.md), and

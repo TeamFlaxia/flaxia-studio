@@ -256,6 +256,18 @@ export class StudioShell {
 
     const tokens = tokenize(line);
     const [name, ...args] = tokens;
+    if (name === 'fetch') {
+      if (!this.shellHost.linuxReady()) {
+        this.error('fetch: boot Linux first.');
+        return;
+      }
+      if (!args[0]) {
+        this.error('usage: fetch <url>');
+        return;
+      }
+      await this.runRemote(`python3 -u /workspace/.flaxia/fetch.py ${quoteShellValue(args[0])}`);
+      return;
+    }
     if (this.shellHost.linuxReady() && !LOCAL_ONLY.has(name ?? '')) {
       await this.runRemote(line);
       return;
@@ -492,6 +504,12 @@ export class StudioShell {
         },
       },
       {
+        name: 'fetch',
+        summary: 'Fetch a URL through the browser Fetch proxy',
+        usage: 'fetch <url>',
+        run: () => 'usage: fetch <url>',
+      },
+      {
         name: 'boot',
         summary: 'Boot the container2wasm Linux image',
         run: () => {
@@ -542,6 +560,10 @@ export class StudioShell {
       },
     ];
   }
+}
+
+function quoteShellValue(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function tokenize(line: string): string[] {

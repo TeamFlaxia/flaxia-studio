@@ -5,6 +5,7 @@ export interface Settings {
   wordWrap: boolean;
   autoSave: boolean;
   minimap: boolean;
+  linuxNetwork: boolean;
   linuxManifestUrl: string;
 }
 
@@ -17,6 +18,7 @@ export const DEFAULT_SETTINGS: Settings = {
   wordWrap: false,
   autoSave: true,
   minimap: true,
+  linuxNetwork: true,
   linuxManifestUrl: 'auto',
 };
 

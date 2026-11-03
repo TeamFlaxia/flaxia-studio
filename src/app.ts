@@ -86,6 +86,7 @@ export class App implements ShellHostish {
     this.editor = new EditorManager(this.editorHost);
     this.shell = new StudioShell(this);
     this.linux.setManifestUrl(this.settings.linuxManifestUrl);
+    this.linux.setNetworkEnabled(this.settings.linuxNetwork);
   }
 
   static async create(): Promise<App> {
@@ -1252,7 +1253,7 @@ export class App implements ShellHostish {
     this.shell.writeLine('\x1b[38;2;100;116;139m[linux] starting container2wasm image…\x1b[0m');
     this.log('Booting Linux…');
     try {
-      const result = await this.linux.boot();
+      const result = await this.linux.boot((text) => this.shell.writeLine(text.trimEnd()));
       this.shell.writeLine(`\x1b[38;2;16;185;129m[linux] ready in ${result.durationMs} ms\x1b[0m`);
       this.log(`Linux ready in ${result.durationMs} ms.`);
       toast('Linux ready', 'The workspace is mounted at /workspace.', 'success', 3000);
@@ -1269,6 +1270,9 @@ export class App implements ShellHostish {
     onOutput: (text: string) => void,
   ): Promise<{ exitCode: number; durationMs: number }> {
     this.log(`$ ${command}`);
+    const network =
+      this.settings.linuxNetwork &&
+      /(https?:\/\/|\b(apk|pip3?|npm|yarn|pnpm)\b|\b(curl|wget)\b)/.test(command);
     const result = await this.linux.run(
       command,
       cwd,
@@ -1277,6 +1281,7 @@ export class App implements ShellHostish {
         this.log(text.replace(/\r?\n$/, ''));
       },
       this.workspace,
+      network,
     );
     await this.syncGuestFiles(result.files);
     this.log(`Linux exited ${result.exitCode} in ${result.durationMs} ms.`);
@@ -1634,6 +1639,12 @@ export class App implements ShellHostish {
           ),
           switchRow('wordWrap', 'Word wrap', 'Wrap long lines in the editor', this.settings.wordWrap),
           switchRow('minimap', 'Minimap', 'Show the Monaco minimap', this.settings.minimap),
+          switchRow(
+            'linuxNetwork',
+            'Linux network',
+            'Route guest HTTP(S) through the browser Fetch proxy (slow: restarts Linux with DHCP)',
+            this.settings.linuxNetwork,
+          ),
         ]),
       ]),
       el('div', { class: 'field' }, [
@@ -1667,6 +1678,7 @@ export class App implements ShellHostish {
       minimap: switches.get('minimap')?.getAttribute('aria-checked') === 'true',
       linuxManifestUrl:
         manifestSelect.value === 'custom' ? manifest.value.trim() || 'auto' : manifestSelect.value,
+      linuxNetwork: switches.get('linuxNetwork')?.getAttribute('aria-checked') === 'true',
     };
     this.settings = next;
     this.saveSettings();
@@ -1678,6 +1690,7 @@ export class App implements ShellHostish {
       minimap: next.minimap,
     });
     this.linux.setManifestUrl(next.linuxManifestUrl);
+    this.linux.setNetworkEnabled(next.linuxNetwork);
     this.lastLinuxStatus = this.linux.status();
     this.renderStatus();
     this.renderSidebar();

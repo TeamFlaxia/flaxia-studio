@@ -56,6 +56,10 @@ export class LinuxRuntime {
   private progress: LinuxProgress | null = null;
   private readonly listeners = new Set<(status: LinuxStatus) => void>();
   private queue: Promise<unknown> = Promise.resolve();
+  private stackWorker: Worker | null = null;
+  private workerNetworkReady = false;
+  private networkEnabled = true;
+  private networkFailed = false;
 
   get manifestUrl(): string {
     return this.manifestSource;
@@ -67,6 +71,16 @@ export class LinuxRuntime {
     this.manifestSource = url.trim() || 'auto';
     this.image = null;
     this.setState('idle', 'Linux', 'Not booted');
+  }
+
+  setNetworkEnabled(enabled: boolean): void {
+    this.networkEnabled = enabled;
+    this.networkFailed = false;
+    if (!enabled) {
+      this.stackWorker?.terminate();
+      this.stackWorker = null;
+      this.workerNetworkReady = false;
+    }
   }
 
   subscribe(listener: (status: LinuxStatus) => void): () => void {
@@ -89,12 +103,12 @@ export class LinuxRuntime {
     return this.state === 'ready' || this.state === 'running';
   }
 
-  async boot(): Promise<LinuxRunResult> {
+  async boot(onOutput: (text: string) => void = () => {}): Promise<LinuxRunResult> {
     if (this.state === 'loading' || this.state === 'running') {
       throw new Error('Linux is already starting or running a command.');
     }
     if (this.state === 'ready' && this.image) {
-      return this.enqueue('uname -a && echo ready', '', () => {}, []);
+      return this.enqueue('uname -a && echo ready', '', onOutput, []);
     }
 
     this.setState('loading', 'Linux', 'Loading manifest…');
@@ -103,7 +117,7 @@ export class LinuxRuntime {
       this.image = image;
       this.label = image.label ?? 'Linux';
       this.setState('loading', this.label, 'Starting Linux…');
-      const result = await this.enqueue('uname -a', '', () => {});
+      const result = await this.enqueue('uname -a', '', onOutput);
       if (result.exitCode !== 0) {
         throw new Error(`Linux boot check exited with code ${result.exitCode}.`);
       }
@@ -121,17 +135,21 @@ export class LinuxRuntime {
     cwd: string,
     onOutput: (text: string) => void,
     workspace: Workspace,
+    network = false,
   ): Promise<LinuxRunResult> {
     if (!this.image) {
       return Promise.reject(new Error('Boot Linux before running commands.'));
     }
     const files = workspace.filePaths().map((path) => ({ path, content: workspace.readFile(path) ?? '' }));
-    return this.enqueue(command, cwd, onOutput, files);
+    return this.enqueue(command, cwd, onOutput, files, network);
   }
 
   async clearCache(): Promise<void> {
     this.worker?.terminate();
+    this.stackWorker?.terminate();
     this.worker = null;
+    this.stackWorker = null;
+    this.workerNetworkReady = false;
     this.image = null;
     this.progress = null;
     try {
@@ -144,7 +162,10 @@ export class LinuxRuntime {
 
   dispose(): void {
     this.worker?.terminate();
+    this.stackWorker?.terminate();
     this.worker = null;
+    this.stackWorker = null;
+    this.workerNetworkReady = false;
     if (this.pending) {
       window.clearTimeout(this.pending.timer);
       this.pending.reject(new Error('Linux runtime disposed.'));
@@ -157,21 +178,24 @@ export class LinuxRuntime {
     cwd: string,
     onOutput: (text: string) => void,
     files?: Array<{ path: string; content: string }>,
+    network = false,
   ): Promise<LinuxRunResult> {
-    const job = this.queue.then(() => this.execute(command, cwd, onOutput, files));
+    const job = this.queue.then(() => this.execute(command, cwd, onOutput, files, network));
     this.queue = job.catch(() => undefined);
     return job;
   }
 
-  private execute(
+  private async execute(
     command: string,
     cwd: string,
     onOutput: (text: string) => void,
     files?: Array<{ path: string; content: string }>,
+    network = false,
   ): Promise<LinuxRunResult> {
     if (!this.image) return Promise.reject(new Error('Linux image is not loaded.'));
     const image = this.image;
     const worker = this.ensureWorker();
+    if (network) await this.ensureNetwork(worker);
     this.setState('running', this.label, `Running: ${command.slice(0, 48)}`);
 
     return new Promise<LinuxRunResult>((resolve, reject) => {
@@ -195,6 +219,7 @@ export class LinuxRuntime {
         cwd,
         command,
         files: files ?? [],
+        network: network && this.networkEnabled && this.workerNetworkReady,
       });
     });
   }
@@ -213,14 +238,54 @@ export class LinuxRuntime {
     throw lastError ?? new Error('No Linux image manifest was found.');
   }
 
+  private async ensureNetwork(worker: Worker): Promise<void> {
+    if (!this.networkEnabled || this.networkFailed || this.workerNetworkReady || !this.image) return;
+    const stackWorker = new Worker(`${import.meta.env.BASE_URL}linux-runtime/stack-worker.js`);
+    stackWorker.onerror = (event) => {
+      console.warn('[flaxia] network proxy worker failed:', event.message);
+    };
+    try {
+      const stackUrl = `${import.meta.env.BASE_URL}linux-runtime/stack.js`;
+      const module = (await import(/* @vite-ignore */ stackUrl)) as {
+        newStack: (
+          worker: Worker,
+          imagePrefix: string,
+          chunks: number,
+          stackWorker: Worker,
+          proxyImage: string,
+        ) => unknown;
+      };
+      const netHandler = module.newStack(
+        worker,
+        this.image.imageUrl,
+        this.image.chunks,
+        stackWorker,
+        `${import.meta.env.BASE_URL}linux-runtime/c2w-net-proxy.wasm`,
+      ) as (event: MessageEvent) => void;
+      worker.onmessage = netHandler;
+      this.stackWorker = stackWorker;
+      this.workerNetworkReady = true;
+    } catch (error) {
+      stackWorker.terminate();
+      this.workerNetworkReady = false;
+      this.networkFailed = true;
+      console.warn('[flaxia] browser Fetch networking unavailable:', error);
+    }
+  }
+
   private ensureWorker(): Worker {
     if (this.worker) return this.worker;
     const worker = new Worker(WORKER_URL, { type: 'module' });
-    worker.onmessage = (event: MessageEvent<WorkerMessage>) => this.handleMessage(event.data);
+    worker.addEventListener('message', (event: MessageEvent<WorkerMessage>) =>
+      this.handleMessage(event.data),
+    );
     worker.onerror = (event) => {
       this.failPending(new Error(event.message || 'Linux worker crashed.'));
       worker.terminate();
       if (this.worker === worker) this.worker = null;
+      this.stackWorker?.terminate();
+      this.stackWorker = null;
+      this.workerNetworkReady = false;
       this.setState('error', this.label, 'Worker crashed');
     };
     this.worker = worker;

@@ -6,7 +6,12 @@
       "!**/dist",
       "!**/node_modules",
       "!**/public/linux",
-      "!**/public/linux-runtime/browser_wasi_shim"
+      "!**/public/linux-runtime/browser_wasi_shim",
+      "!**/public/linux-runtime/browser_wasi_shim_umd",
+      "!**/public/linux-runtime/stack.js",
+      "!**/public/linux-runtime/stack-worker.js",
+      "!**/public/linux-runtime/worker-util.js",
+      "!**/public/linux-runtime/wasi-util.js"
     ]
   },
   "formatter": {

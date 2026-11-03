@@ -63,8 +63,22 @@ If you use a host other than `linux.studio.flaxia.app`, add it to `connect-src` 
 
 ## Networking
 
-The MVP runs the image offline. container2wasm's browser Fetch proxy
-(`c2w-net-proxy.wasm`) and socket fds are not wired into the worker yet. This
-keeps the workspace mount and command sync deterministic. When enabling it,
-expect browser CORS and forbidden-header limits, and add the proxy host to the
-CSP `connect-src` list.
+The browser Fetch proxy (`c2w-net-proxy.wasm` + `stack-worker.js`) is wired into
+`public/linux-runtime/worker.js`. It is enabled by **Settings → Linux network**
+and is used for commands containing a URL or `curl`/`wget`/`apk`/`pip`/`npm`.
+The guest is configured with `http_proxy`/`https_proxy` pointing at
+`192.168.127.253:80` and `SSL_CERT_FILE=/.wasmenv/proxy.crt`.
+
+Because each command is a fresh container boot, a network command performs DHCP
+again and takes roughly 20–30 s. Offline commands (`gcc`, `make`, `git status`)
+stay fast. Use the built-in `fetch <url>` command to exercise the proxy.
+
+Limitations:
+
+- Browser CORS applies. A site must allow the browser origin.
+- The proxy certificate is issued for the proxy address, so HTTPS clients must
+  skip hostname verification (`curl -k`, Python `ssl._create_unverified_context()`).
+  The built-in `fetch` command does this.
+- The Fetch proxy is terminated in the browser; forbidden headers cannot be set.
+- `connect-src` in `public/_headers` allows `https:` for this feature. Tighten
+  it if you only need specific hosts.
