@@ -1,0 +1,11 @@
+node_modules/
+dist/
+public/linux/*.wasm
+public/linux/*.gz
+public/linux/*.json
+!public/linux/.gitkeep
+.DS_Store
+*.local
+.env
+.env.*
+!.env.example

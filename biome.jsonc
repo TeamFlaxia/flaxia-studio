@@ -1,0 +1,60 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.6.4/schema.json",
+  "files": {
+    "includes": [
+      "**",
+      "!**/dist",
+      "!**/node_modules",
+      "!**/public/linux",
+      "!**/public/linux-runtime/browser_wasi_shim"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 110
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "style": {
+        "noDescendingSpecificity": "off"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["scripts/**", "tests/**"],
+      "linter": {
+        "rules": {
+          "performance": { "useDomNodeTextContent": "off" },
+          "style": { "useTemplate": "off" }
+        }
+      }
+    },
+    {
+      "includes": ["src/styles/**"],
+      "linter": {
+        "rules": {
+          "complexity": { "noImportantStyles": "off" }
+        }
+      }
+    }
+  ],
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "semicolons": "always",
+      "trailingCommas": "all"
+    }
+  },
+  "assist": {
+    "actions": {
+      "source": {
+        "organizeImports": "on"
+      }
+    }
+  }
+}
