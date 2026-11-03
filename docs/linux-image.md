@@ -82,3 +82,7 @@ Limitations:
 - The Fetch proxy is terminated in the browser; forbidden headers cannot be set.
 - `connect-src` in `public/_headers` allows `https:` for this feature. Tighten
   it if you only need specific hosts.
+
+Compiled outputs are mirrored back to the workspace as binary files (base64 in
+IndexedDB, ≤ 20 MiB each). Use the explorer context menu or the binary dialog to
+download them; Export ZIP includes them.

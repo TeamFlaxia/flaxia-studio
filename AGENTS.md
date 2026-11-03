@@ -23,7 +23,7 @@ npm run test:e2e
   re-boots the guest with DHCP. Keep normal edit/build commands offline.
 - Monaco workers are bundled with Vite `?worker` imports. Do not switch to the
   AMD loader.
-- `/workspace` sync is text-only (UTF-8, ≤ 2 MiB). Binary build products must
-  not be mirrored.
+- `/workspace` sync handles UTF-8 text and binary artifacts (≤ 20 MiB each).
+  Binaries are base64-encoded in IndexedDB and must not be opened in Monaco.
 - Run `npm run lint`, `npm run typecheck`, `npm test`, and `npm run build`
   before handing work back.

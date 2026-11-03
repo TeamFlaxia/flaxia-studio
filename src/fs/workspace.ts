@@ -1,3 +1,4 @@
+import { base64ToBytes, bytesToBase64 } from './base64.ts';
 import {
   deleteFiles,
   type FileRecord,
@@ -15,6 +16,7 @@ export interface WorkspaceEntry {
   path: string;
   type: 'file' | 'dir';
   content: string;
+  binary?: boolean;
   updatedAt: number;
 }
 
@@ -58,6 +60,7 @@ export class Workspace {
         path: record.path,
         type: record.type,
         content: record.content,
+        binary: record.binary === true,
         updatedAt: record.updatedAt,
       });
     }
@@ -76,7 +79,7 @@ export class Workspace {
   }
 
   private fileEntry(path: string, content: string): WorkspaceEntry {
-    return { path, type: 'file', content, updatedAt: Date.now() };
+    return { path, type: 'file', content, binary: false, updatedAt: Date.now() };
   }
 
   private dirEntry(path: string): WorkspaceEntry {
@@ -90,6 +93,7 @@ export class Workspace {
       path: entry.path,
       type: entry.type,
       content: entry.content,
+      binary: entry.binary === true,
       updatedAt: entry.updatedAt,
     };
   }
@@ -133,14 +137,51 @@ export class Workspace {
 
   readFile(path: string): string | null {
     const entry = this.entries.get(path);
-    return entry?.type === 'file' ? entry.content : null;
+    return entry?.type === 'file' && !entry.binary ? entry.content : null;
+  }
+
+  isBinary(path: string): boolean {
+    return this.entries.get(path)?.binary === true;
+  }
+
+  readBinary(path: string): Uint8Array | null {
+    const entry = this.entries.get(path);
+    if (entry?.type !== 'file' || !entry.binary) return null;
+    return base64ToBytes(entry.content);
+  }
+
+  readBytes(path: string): Uint8Array | null {
+    const entry = this.entries.get(path);
+    if (entry?.type !== 'file') return null;
+    return entry.binary ? base64ToBytes(entry.content) : new TextEncoder().encode(entry.content);
   }
 
   async writeFile(path: string, content: string): Promise<void> {
     const normalized = normalizePath(path);
     if (!normalized) throw new Error('Cannot write to the workspace root.');
     await this.ensureParents(normalized);
-    const entry: WorkspaceEntry = { path: normalized, type: 'file', content, updatedAt: Date.now() };
+    const entry: WorkspaceEntry = {
+      path: normalized,
+      type: 'file',
+      content,
+      binary: false,
+      updatedAt: Date.now(),
+    };
+    this.entries.set(normalized, entry);
+    await this.persist(entry);
+  }
+
+  async writeBinaryFile(path: string, bytes: Uint8Array): Promise<void> {
+    const normalized = normalizePath(path);
+    if (!normalized) throw new Error('Cannot write to the workspace root.');
+    await this.ensureParents(normalized);
+    const entry: WorkspaceEntry = {
+      path: normalized,
+      type: 'file',
+      content: bytesToBase64(bytes),
+      binary: true,
+      updatedAt: Date.now(),
+    };
     this.entries.set(normalized, entry);
     await this.persist(entry);
   }
@@ -219,7 +260,13 @@ export class Workspace {
       const normalized = uniquePath(existing, file.path);
       existing.add(normalized);
       await this.ensureParents(normalized);
-      const entry = this.fileEntry(normalized, file.content);
+      const entry: WorkspaceEntry = {
+        path: normalized,
+        type: 'file',
+        content: file.content,
+        binary: file.binary === true,
+        updatedAt: Date.now(),
+      };
       this.entries.set(normalized, entry);
       records.push(entry);
     }
@@ -232,7 +279,7 @@ export class Workspace {
     return exportZip(
       this.list()
         .filter((entry) => entry.type === 'file')
-        .map((entry) => ({ path: entry.path, content: entry.content })),
+        .map((entry) => ({ path: entry.path, content: entry.content, binary: entry.binary })),
     );
   }
 

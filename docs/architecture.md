@@ -47,9 +47,11 @@
 3. container2wasm's guest init mounts it over virtio-9p at `/workspace`.
 4. The command wrapper copies `/workspace` into `/tmp/flaxia-work`, runs the
    command there (so executable bits work), then copies the result back.
-5. The worker walks the preopen directory and returns every UTF-8 text file.
-6. `App.syncGuestFiles()` applies creates/updates/deletes to IndexedDB, prunes
-   empty directories, and refreshes Monaco models.
+5. The worker walks the preopen directory. UTF-8 files are returned as text;
+   everything else is base64-encoded with `binary: true` (≤ 20 MiB each).
+6. `App.syncGuestFiles()` applies creates/updates/deletes to IndexedDB, stores
+   binaries with `writeBinaryFile()`, prunes empty directories, and refreshes
+   Monaco models. Binaries open a metadata/download dialog instead of Monaco.
 
 The sync is last-write-wins. A dirty editor is saved before a Linux command, and
 the guest is authoritative for the command that just ran.

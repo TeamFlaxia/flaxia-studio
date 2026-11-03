@@ -14,6 +14,7 @@ export interface FileRecord {
   path: string;
   type: 'file' | 'dir';
   content: string;
+  binary?: boolean;
   updatedAt: number;
 }
 

@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { strToU8, zipSync } from 'fflate';
+import { strToU8, unzipSync, zipSync } from 'fflate';
 import { Workspace } from '../src/fs/workspace.ts';
 
 test('workspace persists, renames, imports nested paths, and deletes', async () => {
@@ -32,4 +32,15 @@ test('workspace persists, renames, imports nested paths, and deletes', async () 
 
   const exported = workspace.exportZip();
   assert.ok(exported.byteLength > 0);
+
+  const binary = new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 0x00, 0xff]);
+  await workspace.writeBinaryFile('bin/hello', binary);
+  assert.equal(workspace.isBinary('bin/hello'), true);
+  assert.equal(workspace.readFile('bin/hello'), null);
+  assert.deepEqual([...(workspace.readBinary('bin/hello') ?? [])], [...binary]);
+  const reopenedBinary = await Workspace.open(workspace.id);
+  assert.deepEqual([...(reopenedBinary?.readBinary('bin/hello') ?? [])], [...binary]);
+
+  const zipWithBinary = unzipSync(workspace.exportZip());
+  assert.deepEqual([...(zipWithBinary['bin/hello'] ?? [])], [...binary]);
 });

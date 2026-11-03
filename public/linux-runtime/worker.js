@@ -335,7 +335,10 @@ function buildWorkspaceDirectory(files) {
       }
     }
     const name = segments[segments.length - 1];
-    directory.set(name, new File(new TextEncoder().encode(file.content ?? '')));
+    const data = file.binary
+      ? base64ToBytes(file.content ?? '')
+      : new TextEncoder().encode(file.content ?? '');
+    directory.set(name, new File(data));
   }
   return new Directory(root);
 }
@@ -350,12 +353,13 @@ function collectFiles(preopen) {
       if (entry instanceof Directory) {
         walk(entry.contents, path);
       } else if (entry && entry.data instanceof Uint8Array) {
-        if (entry.data.byteLength > 2 * 1024 * 1024) continue;
+        if (entry.data.byteLength > 20 * 1024 * 1024) continue;
         try {
-          files.push({ path, content: strict.decode(entry.data) });
+          const text = strict.decode(entry.data);
+          if (text.includes('\0')) throw new Error('binary');
+          files.push({ path, content: text, binary: false });
         } catch {
-          // Binary output from the guest is intentionally not mirrored into the
-          // text-only browser workspace.
+          files.push({ path, content: bytesToBase64(entry.data), binary: true });
         }
       }
     }
@@ -633,6 +637,24 @@ class OutputFd {
   fd_read() {
     return { ret: 0, data: new Uint8Array(0) };
   }
+}
+
+function bytesToBase64(bytes) {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunk));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(value) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
 }
 
 function normalizeGuestPath(input) {

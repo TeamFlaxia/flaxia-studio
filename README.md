@@ -15,6 +15,8 @@ quiet-craft surface language of Flaxia: emerald accents, 1px hairlines,
 - container2wasm Debian Linux in a Web Worker
 - A terminal that routes commands to Linux once it is booted
 - `/workspace` sync between Monaco and the guest, including `gcc file.c && ./a.out`
+- Compiled binaries are saved as binary workspace files (visible in the explorer,
+  downloadable, and included in Export ZIP)
 
 ## Quick start
 
@@ -83,8 +85,10 @@ R2 / static assets
 - The workspace is a preopened directory at `/workspace` (virtio-9p in the
   guest). Commands run in a writable `/tmp/flaxia-work` copy so compiled
   binaries can execute, then the result is mirrored back.
-- Only UTF-8 text files ≤ 2 MiB are mirrored. Binary build products stay inside
-  the VM. Empty directories are not preserved by command-mode sync.
+- UTF-8 text files and binary artifacts (≤ 20 MiB each) are mirrored. Binaries
+  are stored base64-encoded in IndexedDB, shown with a binary icon, and can be
+  downloaded or exported in the ZIP. Empty directories are not preserved by
+  command-mode sync.
 - The browser Fetch proxy (`c2w-net-proxy`) is available for commands that need
   the network (`fetch`, `curl`, `apk`, `pip`, URLs, …). It restarts Linux with
   DHCP, so a network command takes roughly 20–30 s on the current WASI image.

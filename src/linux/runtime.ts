@@ -17,8 +17,14 @@ export interface LinuxStatus {
   image: ResolvedLinuxImage | null;
 }
 
+export interface LinuxFile {
+  path: string;
+  content: string;
+  binary?: boolean;
+}
+
 export interface LinuxRunResult {
-  files: Array<{ path: string; content: string }>;
+  files: LinuxFile[];
   exitCode: number;
   durationMs: number;
 }
@@ -36,7 +42,7 @@ interface WorkerMessage {
   loaded?: number;
   total?: number;
   text?: string;
-  files?: Array<{ path: string; content: string }>;
+  files?: LinuxFile[];
   exitCode?: number;
   durationMs?: number;
   message?: string;
@@ -140,7 +146,14 @@ export class LinuxRuntime {
     if (!this.image) {
       return Promise.reject(new Error('Boot Linux before running commands.'));
     }
-    const files = workspace.filePaths().map((path) => ({ path, content: workspace.readFile(path) ?? '' }));
+    const files = workspace.filePaths().map((path) => {
+      const entry = workspace.get(path);
+      return {
+        path,
+        content: entry?.content ?? '',
+        binary: entry?.binary === true,
+      };
+    });
     return this.enqueue(command, cwd, onOutput, files, network);
   }
 
@@ -177,7 +190,7 @@ export class LinuxRuntime {
     command: string,
     cwd: string,
     onOutput: (text: string) => void,
-    files?: Array<{ path: string; content: string }>,
+    files?: LinuxFile[],
     network = false,
   ): Promise<LinuxRunResult> {
     const job = this.queue.then(() => this.execute(command, cwd, onOutput, files, network));
@@ -189,7 +202,7 @@ export class LinuxRuntime {
     command: string,
     cwd: string,
     onOutput: (text: string) => void,
-    files?: Array<{ path: string; content: string }>,
+    files?: LinuxFile[],
     network = false,
   ): Promise<LinuxRunResult> {
     if (!this.image) return Promise.reject(new Error('Linux image is not loaded.'));

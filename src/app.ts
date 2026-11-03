@@ -1,4 +1,5 @@
 import { EditorManager } from './editor/monaco';
+import { base64ByteLength, base64ToBytes } from './fs/base64';
 import { basename, dirname, isPathInside, joinPath, languageForPath } from './fs/path';
 import type { WorkspaceEntry } from './fs/workspace';
 import { Workspace } from './fs/workspace';
@@ -27,6 +28,7 @@ interface TreeNode {
   path: string;
   name: string;
   type: 'file' | 'dir';
+  binary?: boolean;
   children: TreeNode[];
 }
 
@@ -466,6 +468,13 @@ export class App implements ShellHostish {
         { label: 'New Folder', icon: 'folder-plus' as IconName, run: () => void this.newFolder(node.path) },
       );
     }
+    if (node.type === 'file') {
+      items.push({
+        label: 'Download',
+        icon: 'download' as IconName,
+        run: () => this.downloadFile(node.path),
+      });
+    }
     items.push(
       { label: 'Rename…', icon: 'pencil' as IconName, run: () => void this.renamePath(node.path) },
       {
@@ -805,6 +814,10 @@ export class App implements ShellHostish {
   }
 
   openFile(path: string, line?: number): void {
+    if (this.workspace.isBinary(path)) {
+      void this.openBinaryFile(path);
+      return;
+    }
     const content = this.workspace.readFile(path);
     if (content === null) {
       toast('Cannot open file', `${path} does not exist.`, 'warning');
@@ -824,6 +837,38 @@ export class App implements ShellHostish {
     this.renderSidebar();
     this.renderStatus();
     window.setTimeout(() => this.layout(), 0);
+  }
+
+  private async openBinaryFile(path: string): Promise<void> {
+    const entry = this.workspace.get(path);
+    if (entry?.type !== 'file') return;
+    const size = entry.binary ? base64ByteLength(entry.content) : entry.content.length;
+    const result = await openDialog({
+      title: path,
+      body: `Binary file — ${formatBytes(size)}\n\nCompiled artifacts and other binaries are stored in IndexedDB and included in Export ZIP. They are not opened in Monaco.`,
+      width: 460,
+      centered: true,
+      actions: [
+        { label: 'Close', value: '' },
+        { label: 'Download', value: 'download', primary: true },
+      ],
+    });
+    if (result === 'download') this.downloadFile(path);
+  }
+
+  downloadFile(path: string): void {
+    const bytes = this.workspace.readBytes(path);
+    if (!bytes) {
+      toast('Download failed', `${path} is not a file.`, 'error');
+      return;
+    }
+    const blob = new Blob([bytes.slice().buffer], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = basename(path);
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   private async closeFile(path: string, discard = false): Promise<void> {
@@ -1298,8 +1343,11 @@ export class App implements ShellHostish {
     toast('Cache cleared', 'The next boot downloads the image again.', 'info');
   }
 
-  private async syncGuestFiles(files: Array<{ path: string; content: string }>): Promise<void> {
-    const guest = new Map(files.map((file) => [file.path, file.content]));
+  private async syncGuestFiles(
+    files: Array<{ path: string; content: string; binary?: boolean }>,
+  ): Promise<void> {
+    const guest = new Map(files.map((file) => [file.path, file]));
+    const binaryNames: string[] = [];
     let changed = 0;
     const removed: string[] = [];
     for (const path of this.workspace.filePaths()) {
@@ -1311,13 +1359,20 @@ export class App implements ShellHostish {
       if (this.openTabs.includes(path)) await this.closeFile(path, true);
       changed += 1;
     }
-    for (const [path, content] of guest) {
-      const current = this.workspace.readFile(path);
-      if (current === content) continue;
-      await this.workspace.writeFile(path, content);
-      if (this.editor.hasModel(path)) {
-        this.editor.setValue(path, content);
-        this.editor.markSaved(path);
+    for (const [path, file] of guest) {
+      const entry = this.workspace.get(path);
+      if (entry && entry.binary === (file.binary === true) && entry.content === file.content) continue;
+      if (file.binary) {
+        await this.workspace.writeBinaryFile(path, base64ToBytes(file.content));
+        if (this.openTabs.includes(path)) await this.closeFile(path, true);
+        else if (this.editor.hasModel(path)) this.editor.close(path);
+        binaryNames.push(path);
+      } else {
+        await this.workspace.writeFile(path, file.content);
+        if (this.editor.hasModel(path)) {
+          this.editor.setValue(path, file.content);
+          this.editor.markSaved(path);
+        }
       }
       changed += 1;
     }
@@ -1335,6 +1390,10 @@ export class App implements ShellHostish {
       this.renderExplorer();
       this.renderTabs();
       this.log(`Synced ${changed} workspace file change(s) from Linux.`);
+    }
+    for (const path of binaryNames) {
+      this.log(`Saved binary artifact ${path}.`);
+      toast('Binary saved', `${path} is in the workspace (download it from the explorer).`, 'success', 3600);
     }
   }
 
@@ -1408,6 +1467,16 @@ export class App implements ShellHostish {
         run: () => {
           const target = this.selectedPath ?? this.activePath;
           if (target) void this.deletePath(target);
+        },
+      },
+      {
+        id: 'file.download',
+        label: 'File: Download',
+        group: 'File',
+        icon: 'download',
+        run: () => {
+          const target = this.selectedPath ?? this.activePath;
+          if (target) this.downloadFile(target);
         },
       },
       {
@@ -1783,6 +1852,7 @@ function buildTree(entries: WorkspaceEntry[]): TreeNode[] {
       path: entry.path,
       name: basename(entry.path),
       type: entry.type,
+      binary: entry.binary === true,
       children: [],
     };
     nodes.set(entry.path, node);
