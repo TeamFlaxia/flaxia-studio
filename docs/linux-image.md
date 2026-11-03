@@ -86,3 +86,18 @@ Limitations:
 Compiled outputs are mirrored back to the workspace as binary files (base64 in
 IndexedDB, ≤ 20 MiB each). Use the explorer context menu or the binary dialog to
 download them; Export ZIP includes them.
+
+### CORS and package managers
+
+The Fetch proxy still goes through the browser's Fetch API, so the **target**
+server must send `Access-Control-Allow-Origin`. That is not something Flaxia
+Studio can grant: `dl-cdn.alpinelinux.org` (and most package repositories) do not
+send it, and their 301 redirects are blocked before APK can proceed.
+
+- Use the **Full** image (Debian + gcc/build tools) for compiling.
+- Build additional tools into `docker/studio-linux.Dockerfile` rather than
+  running `apk`/`apt` inside the browser VM.
+- If you really need an external package registry, put an **allowlisted
+  same-origin proxy** in front of it. Do not create an open "allow everything"
+  proxy: it becomes an SSRF/abuse endpoint and still cannot change third-party
+  CORS behavior by itself.

@@ -77,6 +77,7 @@ export class App implements ShellHostish {
   private cursor = { line: 1, column: 1, selected: 0 };
   private outputLines: Array<{ time: string; message: string }> = [];
   private saveTimers = new Map<string, number>();
+  private warnedApkCors = false;
   private lastLinuxStatus: LinuxStatus;
   private linuxUnsubscribe: (() => void) | null = null;
 
@@ -1318,6 +1319,13 @@ export class App implements ShellHostish {
     const network =
       this.settings.linuxNetwork &&
       /(https?:\/\/|\b(apk|pip3?|npm|yarn|pnpm)\b|\b(curl|wget)\b)/.test(command);
+    if (network && /\bapk\s+(add|update|upgrade)\b/.test(command) && !this.warnedApkCors) {
+      this.warnedApkCors = true;
+      const message =
+        'Alpine package repositories do not send CORS headers, so the browser Fetch proxy cannot download them. Use the Full image (gcc/git included) or build packages into the image.';
+      this.log(message);
+      toast('apk is blocked by CORS', message, 'warning', 9000);
+    }
     const result = await this.linux.run(
       command,
       cwd,
@@ -1330,6 +1338,11 @@ export class App implements ShellHostish {
     );
     await this.syncGuestFiles(result.files);
     this.log(`Linux exited ${result.exitCode} in ${result.durationMs} ms.`);
+    if (network && result.exitCode !== 0) {
+      this.log(
+        'Network hint: third-party hosts must allow this page with CORS. apk/pip mirrors usually do not; use the Full image or a server-side allowlisted proxy.',
+      );
+    }
     return result;
   }
 

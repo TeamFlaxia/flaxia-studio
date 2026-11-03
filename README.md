@@ -93,6 +93,9 @@ R2 / static assets
 - The browser Fetch proxy (`c2w-net-proxy`) is available for commands that need
   the network (`fetch`, `curl`, `apk`, `pip`, URLs, …). It restarts Linux with
   DHCP, so a network command takes roughly 20–30 s on the current WASI image.
+  Third-party servers must send CORS headers; Alpine's package CDN does not, so
+  `apk add` is blocked by the browser. Use the Full image or build packages into
+  the image instead.
   Normal offline commands stay fast. Disable it in Settings for a pure offline
   session.
 
