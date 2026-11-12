@@ -9,6 +9,8 @@ import { loadSettings, type Settings, saveSettings } from './lib/settings';
 import { matchesShortcut, modShortcut } from './lib/shortcut';
 import { cycleTheme, getTheme, initTheme, setTheme, themeLabel } from './lib/theme';
 import { LinuxRuntime, type LinuxStatus } from './linux/runtime';
+import { PlayHost, type PlayStatus, PlayStopped } from './play/host';
+import { isPlayPayloadPath, type PlayFile, type PlayPayload, validatePlayFiles } from './play/policy';
 import { StudioShell } from './terminal/shell';
 import { showContextMenu } from './ui/context-menu';
 import { confirmDialog, openDialog, promptDialog } from './ui/dialog';
@@ -56,6 +58,10 @@ export class App implements ShellHostish {
   private outputView!: HTMLElement;
   private problemsView!: HTMLElement;
   private statusbar!: HTMLElement;
+  private editorMain!: HTMLElement;
+  private editorColumn!: HTMLElement;
+  private playPane!: HTMLElement;
+  private runPill!: HTMLButtonElement;
   private vmPill!: HTMLButtonElement;
   private vmDetail!: HTMLElement;
   private commandTrigger!: HTMLButtonElement;
@@ -63,6 +69,7 @@ export class App implements ShellHostish {
   private importInput!: HTMLInputElement;
   private editor: EditorManager;
   private shell: StudioShell;
+  private playHost: PlayHost;
   private linux = new LinuxRuntime();
   private readonly openTabs: string[] = [];
   private activePath: string | null = null;
@@ -80,6 +87,9 @@ export class App implements ShellHostish {
   private warnedApkCors = false;
   private lastLinuxStatus: LinuxStatus;
   private linuxUnsubscribe: (() => void) | null = null;
+  private playVisible = false;
+  private playHasRun = false;
+  private playReloadTimer: number | undefined;
 
   constructor(workspace: Workspace) {
     this.workspace = workspace;
@@ -88,6 +98,7 @@ export class App implements ShellHostish {
     this.editorHost = el('div', { class: 'editor-host', attrs: { 'aria-label': 'Editor' } });
     this.editor = new EditorManager(this.editorHost);
     this.shell = new StudioShell(this);
+    this.playHost = new PlayHost((status, detail) => this.handlePlayStatus(status, detail));
     this.linux.setManifestUrl(this.settings.linuxManifestUrl);
     this.linux.setNetworkEnabled(this.settings.linuxNetwork);
   }
@@ -118,6 +129,7 @@ export class App implements ShellHostish {
       minimap: this.settings.minimap,
     });
     this.editor.setTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
+    this.playHost.mount(this.playPane);
     this.shell.mount();
     this.shell.setTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
     this.linuxUnsubscribe = this.linux.subscribe((status) => this.handleLinuxStatus(status));
@@ -130,6 +142,8 @@ export class App implements ShellHostish {
     });
     window.addEventListener('resize', () => this.layout());
     window.addEventListener('pagehide', () => {
+      if (this.playReloadTimer !== undefined) window.clearTimeout(this.playReloadTimer);
+      this.playHost.dispose();
       this.linuxUnsubscribe?.();
       this.linux.dispose();
     });
@@ -158,12 +172,10 @@ export class App implements ShellHostish {
     this.tabsBar = el('div', { class: 'tabs', role: 'tablist', attrs: { 'aria-label': 'Open editors' } });
     this.breadcrumbs = el('div', { class: 'breadcrumbs' });
     this.welcome = el('div', { class: 'welcome' });
-    this.editorArea = el('main', { class: 'editor-area' }, [
-      this.tabsBar,
-      this.breadcrumbs,
-      this.editorHost,
-      this.welcome,
-    ]);
+    this.editorColumn = el('div', { class: 'editor-column' }, [this.editorHost, this.welcome]);
+    this.playPane = el('div', { class: 'play-pane hidden', attrs: { 'aria-label': 'Test Play preview' } });
+    this.editorMain = el('div', { class: 'editor-main' }, [this.editorColumn, this.playPane]);
+    this.editorArea = el('main', { class: 'editor-area' }, [this.tabsBar, this.breadcrumbs, this.editorMain]);
 
     const body = el('div', { class: 'studio-body' }, [this.rail, this.sidebar, this.editorArea]);
 
@@ -239,6 +251,18 @@ export class App implements ShellHostish {
       ],
     );
 
+    this.runPill = el(
+      'button',
+      {
+        class: 'run-pill',
+        type: 'button',
+        dataset: { state: 'idle' },
+        title: `Test Play (${modShortcut('Shift+Enter')})`,
+        on: { click: () => this.runTestPlay() },
+      },
+      [icon('play', 13), el('span', { class: 'run-pill-label', text: 'Test Play' })],
+    ) as HTMLButtonElement;
+
     this.vmPill = el(
       'button',
       {
@@ -264,6 +288,7 @@ export class App implements ShellHostish {
 
     const settingsButton = iconButton('settings', 'Settings', () => void this.openSettings());
     const actions = el('div', { class: 'topbar-actions' }, [
+      this.runPill,
       this.vmPill,
       iconButton('terminal', 'Toggle panel', () => this.togglePanel()),
       themeButton,
@@ -750,6 +775,12 @@ export class App implements ShellHostish {
 
     const actions: Array<{ icon: IconName; title: string; desc: string; run: () => void }> = [
       {
+        icon: 'play',
+        title: 'Test Play',
+        desc: `Run index.html in a sandboxed preview · ${modShortcut('Shift+Enter')}`,
+        run: () => this.runTestPlay(),
+      },
+      {
         icon: 'file-code',
         title: 'New File',
         desc: 'Create a file in the current workspace',
@@ -780,7 +811,7 @@ export class App implements ShellHostish {
       el('h1', {}, ['Code with the ', el('span', { text: 'Flaxia' }), ' feel.']),
       el('p', {
         class: 'welcome-lede',
-        text: 'A Monaco editor with a real Linux workspace running in WebAssembly. Quiet surfaces, emerald accents, and a command palette that stays out of your way.',
+        text: 'A Monaco editor with sandboxed Test Play previews and a real Linux workspace in WebAssembly. Quiet surfaces, emerald accents, and a command palette that stays out of your way.',
       }),
       el(
         'div',
@@ -797,9 +828,10 @@ export class App implements ShellHostish {
       ),
       el('div', { class: 'welcome-meta' }, [
         el('span', {}, [el('kbd', { class: 'kbd', text: modShortcut('K') }), 'Commands']),
+        el('span', {}, [el('kbd', { class: 'kbd', text: modShortcut('Shift+Enter') }), 'Test Play']),
         el('span', {}, [el('kbd', { class: 'kbd', text: modShortcut('S') }), 'Save']),
         el('span', {}, [el('kbd', { class: 'kbd', text: modShortcut('`') }), 'Terminal']),
-        el('span', { text: 'Workspace: IndexedDB · Linux: container2wasm' }),
+        el('span', { text: 'Workspace: IndexedDB · Preview: sandboxed · Linux: container2wasm' }),
       ]),
     ]);
     this.welcome.replaceChildren(inner);
@@ -917,6 +949,7 @@ export class App implements ShellHostish {
     await this.workspace.writeFile(path, value);
     this.editor.markSaved(path);
     this.renderTabs();
+    this.schedulePlayReload();
     if (!quiet) {
       this.log(`Saved ${path}`);
       toast('Saved', path, 'success', 1400);
@@ -929,6 +962,85 @@ export class App implements ShellHostish {
     }
     this.log('Saved all open files.');
     toast('Saved all', `${this.openTabs.length} open file(s)`, 'success', 1600);
+  }
+
+  // ------------------------------------------------------------
+  // Test Play
+  // ------------------------------------------------------------
+  runTestPlay(): void {
+    void this.executeTestPlay();
+  }
+
+  private async executeTestPlay(): Promise<void> {
+    const files: PlayFile[] = [];
+    for (const path of this.workspace.filePaths()) {
+      if (!isPlayPayloadPath(path)) continue;
+      const bytes = this.workspace.readBytes(path);
+      if (bytes) files.push({ path, bytes });
+    }
+
+    let payload: PlayPayload;
+    try {
+      payload = validatePlayFiles(files);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.handlePlayStatus('error', message);
+      this.log(`Test Play: ${message}`);
+      toast('Test Play', message, 'error');
+      return;
+    }
+
+    this.setPlayVisible(true);
+    try {
+      await this.playHost.execute(payload);
+      this.playHasRun = true;
+      this.log(
+        `Test Play started: ${payload.entry} (${payload.files.length} files, ${formatBytes(payload.totalBytes)})`,
+      );
+    } catch (error) {
+      if (error instanceof PlayStopped) return;
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`Test Play failed: ${message}`);
+      toast('Test Play failed', message, 'error');
+    }
+  }
+
+  stopTestPlay(): void {
+    if (!this.playHost.busy && this.playHost.currentStatus !== 'running') return;
+    this.playHost.stop();
+    this.log('Test Play stopped.');
+  }
+
+  private setPlayVisible(visible: boolean): void {
+    if (this.playVisible === visible) return;
+    this.playVisible = visible;
+    this.playPane.classList.toggle('hidden', !visible);
+    window.setTimeout(() => this.layout(), 0);
+  }
+
+  private schedulePlayReload(): void {
+    if (!this.settings.playAutoReload) return;
+    if (!this.playVisible || !this.playHasRun) return;
+    if (this.playReloadTimer !== undefined) window.clearTimeout(this.playReloadTimer);
+    this.playReloadTimer = window.setTimeout(() => {
+      this.playReloadTimer = undefined;
+      void this.executeTestPlay();
+    }, 450);
+  }
+
+  private handlePlayStatus(status: PlayStatus, detail?: string): void {
+    this.runPill.dataset.state = status;
+    const label =
+      status === 'loading'
+        ? 'Loading…'
+        : status === 'running'
+          ? 'Running'
+          : status === 'error'
+            ? 'Failed'
+            : 'Test Play';
+    const labelEl = this.runPill.querySelector('.run-pill-label');
+    if (labelEl) labelEl.textContent = label;
+    this.runPill.title = detail ? `Test Play: ${detail}` : `Test Play (${modShortcut('Shift+Enter')})`;
   }
 
   // ------------------------------------------------------------
@@ -1551,6 +1663,28 @@ export class App implements ShellHostish {
         run: () => this.showTerminal(),
       },
       {
+        id: 'test.run',
+        label: 'Test: Run Test Play',
+        group: 'Test',
+        icon: 'play',
+        hint: modShortcut('Shift+Enter'),
+        run: () => this.runTestPlay(),
+      },
+      {
+        id: 'test.stop',
+        label: 'Test: Stop Test Play',
+        group: 'Test',
+        icon: 'x',
+        run: () => this.stopTestPlay(),
+      },
+      {
+        id: 'view.play',
+        label: 'View: Toggle Test Play Pane',
+        group: 'View',
+        icon: 'panel-right',
+        run: () => this.setPlayVisible(!this.playVisible),
+      },
+      {
         id: 'view.settings',
         label: 'Preferences: Open Settings',
         group: 'Preferences',
@@ -1722,6 +1856,22 @@ export class App implements ShellHostish {
           ),
           switchRow('wordWrap', 'Word wrap', 'Wrap long lines in the editor', this.settings.wordWrap),
           switchRow('minimap', 'Minimap', 'Show the Monaco minimap', this.settings.minimap),
+        ]),
+      ]),
+      el('div', { class: 'field' }, [
+        el('span', { class: 'field-label', text: 'Test Play' }),
+        el('div', {}, [
+          switchRow(
+            'playAutoReload',
+            'Auto reload',
+            'Re-run the sandboxed preview ~450ms after a save',
+            this.settings.playAutoReload,
+          ),
+        ]),
+      ]),
+      el('div', { class: 'field' }, [
+        el('span', { class: 'field-label', text: 'Linux (sub-feature)' }),
+        el('div', {}, [
           switchRow(
             'linuxNetwork',
             'Linux network',
@@ -1729,9 +1879,6 @@ export class App implements ShellHostish {
             this.settings.linuxNetwork,
           ),
         ]),
-      ]),
-      el('div', { class: 'field' }, [
-        el('span', { class: 'field-label', text: 'Linux image' }),
         manifestSelect,
         manifest,
         el('span', {
@@ -1759,6 +1906,7 @@ export class App implements ShellHostish {
       wordWrap: switches.get('wordWrap')?.getAttribute('aria-checked') === 'true',
       autoSave: switches.get('autoSave')?.getAttribute('aria-checked') === 'true',
       minimap: switches.get('minimap')?.getAttribute('aria-checked') === 'true',
+      playAutoReload: switches.get('playAutoReload')?.getAttribute('aria-checked') === 'true',
       linuxManifestUrl:
         manifestSelect.value === 'custom' ? manifest.value.trim() || 'auto' : manifestSelect.value,
       linuxNetwork: switches.get('linuxNetwork')?.getAttribute('aria-checked') === 'true',
@@ -1834,6 +1982,11 @@ export class App implements ShellHostish {
         if (matchesShortcut(event, 'mod+n') && !event.shiftKey) {
           event.preventDefault();
           void this.newFile();
+          return;
+        }
+        if (matchesShortcut(event, 'mod+shift+enter')) {
+          event.preventDefault();
+          this.runTestPlay();
           return;
         }
         if (event.key === 'F1') {

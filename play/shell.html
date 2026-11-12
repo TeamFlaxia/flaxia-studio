@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Test Play</title>
+    <meta name="robots" content="noindex" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <script src="/theme-boot.js"></script>
+  </head>
+  <body class="play-shell">
+    <div id="play-stage" class="play-stage"></div>
+    <div id="play-loading" class="play-overlay" role="status">
+      <span class="play-spinner" aria-hidden="true"></span>
+      <span>Preparing preview…</span>
+    </div>
+    <div id="play-error" class="play-overlay play-error hidden" role="alert"></div>
+    <script type="module" src="/src/play/shell.ts"></script>
+  </body>
+</html>

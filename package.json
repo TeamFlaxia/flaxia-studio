@@ -2,7 +2,7 @@
   "name": "flaxia-studio",
   "version": "0.1.0",
   "private": true,
-  "description": "A Flaxia-flavoured browser IDE with Monaco and container2wasm Linux",
+  "description": "A Flaxia-flavoured browser IDE with Monaco, sandboxed Test Play previews, and container2wasm Linux",
   "type": "module",
   "scripts": {
     "dev": "vite --host",

@@ -28,16 +28,18 @@
 
 ## Modules
 
-| Path                             | Responsibility                                                  |
-| -------------------------------- | --------------------------------------------------------------- |
-| `src/app.ts`                     | Shell, commands, state, keyboard, workspace/Linux orchestration |
-| `src/editor/monaco.ts`           | Monaco setup, workers, themes, models, dirty state              |
-| `src/fs/`                        | Path rules, IndexedDB persistence, ZIP import/export            |
-| `src/linux/manifest.ts`          | Manifest validation and chunk URL resolution                    |
-| `src/linux/runtime.ts`           | Worker lifecycle, boot, progress, command queue, cache          |
-| `src/terminal/shell.ts`          | xterm shell, local commands, Linux routing                      |
-| `public/linux-runtime/worker.js` | WASI boot, `/workspace` preopen, sync                           |
-| `src/ui/`                        | Palette, dialogs, toasts, context menu                          |
+| Path                             | Responsibility                                                   |
+| -------------------------------- | ---------------------------------------------------------------- |
+| `src/app.ts`                     | Shell, commands, state, keyboard, workspace/Linux orchestration  |
+| `src/editor/monaco.ts`           | Monaco setup, workers, themes, models, dirty state               |
+| `src/fs/`                        | Path rules, IndexedDB persistence, ZIP import/export             |
+| `src/play/`                      | Test Play policy, URL rewriting, host/shell bridge               |
+| `src/linux/manifest.ts`          | Manifest validation and chunk URL resolution                     |
+| `src/linux/runtime.ts`           | Worker lifecycle, boot, progress, command queue, cache           |
+| `src/terminal/shell.ts`          | xterm shell, local commands, Linux routing                       |
+| `public/linux-runtime/worker.js` | WASI boot, `/workspace` preopen, sync                            |
+| `public/play/runtime.js`         | In-frame runtime: blob registry, asset placeholders, entry write |
+| `src/ui/`                        | Palette, dialogs, toasts, context menu                           |
 
 ## Persistent session
 
@@ -80,6 +82,36 @@ the guest is authoritative for the command that just ran.
    `uname -a` as a readiness check.
 6. The compiled image is cached in the Cache API keyed by version/digest.
 
+## Test Play
+
+Test Play previews the workspace in the browser. The studio page keeps its
+strict CSP and never embeds untrusted content directly; the preview runs
+through two same-origin documents:
+
+```
+studio page (strict CSP, COEP: require-corp)
+└─ /play/shell.html            trusted, same origin, relaxed CSP
+   └─ /play/runtime.html       sandboxed frame, opaque origin
+      └─ entry document        written by the runtime
+```
+
+1. The studio builds a payload from the workspace (`src/play/policy.ts`
+   applies the Arcade allowlist and limits), then talks to the shell with a
+   typed handshake: `ready → init → init-ack → execute → result`.
+2. The shell re-validates the payload, rewrites local references in HTML and
+   CSS to `blob:flaxia-play/<path>` placeholders (`src/play/rewrite.ts`,
+   `src/play/placeholder.ts`) and forwards the bytes to the runtime.
+3. The runtime runs **inside** the sandboxed frame, so it owns the blob
+   registry: it replaces the placeholders with blob URLs it creates itself and
+   writes the entry document. Chromium refuses to load a blob URL that was
+   created by another origin, which is why the blobs can not live in the shell.
+4. The shell relays the result to the studio, which marks the run as running
+   or failed.
+
+`allow-same-origin` is never granted, so the game frame has an opaque origin:
+`localStorage` and cookies are unavailable to previewed code. `fetch()` for
+workspace files is bridged by the runtime.
+
 ## Headers
 
 The app needs cross-origin isolation only for the worker/SAB-friendly runtime:
@@ -95,3 +127,8 @@ Content-Security-Policy: …
 
 `style-src 'unsafe-inline'` is required by Monaco and xterm. Scripts stay strict:
 the theme boot lives in `public/theme-boot.js` rather than an inline script.
+
+The `/play/*` rule replaces the CSP with the relaxed game policy and swaps
+COEP for `credentialless`, because a cross-origin isolated page may only embed
+frames that opt in. The same CSP string is kept in `public/_headers`,
+`scripts/serve-dist.mjs` and `vite.config.ts` — change all three together.

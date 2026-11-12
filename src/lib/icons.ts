@@ -30,6 +30,7 @@ export type IconName =
   | 'info'
   | 'panel-bottom'
   | 'panel-left'
+  | 'panel-right'
   | 'more'
   | 'copy'
   | 'external'
@@ -209,6 +210,10 @@ const ICONS: Record<IconName, IconNode> = {
   'panel-left': [
     ['rect', { width: '18', height: '18', x: '3', y: '3', rx: '2' }],
     ['path', { d: 'M9 3v18' }],
+  ],
+  'panel-right': [
+    ['rect', { width: '18', height: '18', x: '3', y: '3', rx: '2' }],
+    ['path', { d: 'M15 3v18' }],
   ],
   more: [
     ['circle', { cx: '12', cy: '12', r: '1' }],

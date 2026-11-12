@@ -1,7 +1,8 @@
 # Flaxia Studio
 
-A Monaco-based browser IDE that keeps the Flaxia design language and runs a
-Debian Linux workspace through [container2wasm](https://github.com/container2wasm/container2wasm).
+A Monaco-based browser IDE that keeps the Flaxia design language, previews web
+projects in a sandboxed **Test Play** pane, and runs a Debian Linux workspace
+through [container2wasm](https://github.com/container2wasm/container2wasm).
 
 Flaxia Studio is an independent app (`studio.flaxia.app`) that inherits the
 quiet-craft surface language of Flaxia: emerald accents, 1px hairlines,
@@ -12,7 +13,9 @@ quiet-craft surface language of Flaxia: emerald accents, 1px hairlines,
 - Monaco editor with local workers (no CDN, no remote code)
 - IndexedDB workspace with tabs, quick open, search, rename/delete, ZIP import/export
 - Light / dark / system themes with FOUC-free boot
-- container2wasm Debian Linux in a Web Worker
+- **Test Play**: run the workspace `index.html` in a sandboxed preview pane next
+  to the editor, with a ~450 ms auto reload after every save
+- container2wasm Debian Linux in a Web Worker (a sub-feature, not the focus)
 - A terminal that routes commands to Linux once it is booted
 - A **persistent Linux session**: boot once, then commands run in the same guest
   (~0.7 s instead of ~3 s per command; gcc itself remains CPU-bound)
@@ -43,6 +46,23 @@ npm run build:linux
 ```
 
 Then click **Boot Linux** in the top bar, or run `boot` in the terminal.
+
+## Test Play
+
+Test Play previews the workspace in the browser — no container, no build step.
+
+1. Press <kbd>Ctrl/Cmd</kbd> + <kbd>Shift</kbd> + <kbd>Enter</kbd>, click the
+   **Test Play** pill, or run `play` in the terminal.
+2. The shell picks the shallowest `index.html` in the workspace and runs it in a
+   sandboxed frame next to the editor.
+3. Every save re-runs the preview ~450 ms later (toggle with **Settings → Test
+   Play → Auto reload**).
+
+The preview follows the Flaxia Arcade execution policy: an allowlist of web
+assets (no `.svg`, no nested ZIP), 1024 files, 25 MB per run, path traversal and
+absolute paths rejected, and `allow-same-origin` is never granted. The strict
+production CSP stays on the studio page; only the same-origin shell under
+`/play/*` gets the relaxed policy that games need.
 
 ## Performance
 
@@ -130,10 +150,19 @@ The Linux image is verified against the SHA-256 digest in its manifest before
 compilation. Use same-origin image chunks (or a CORS/CORP-enabled host) so COEP
 does not block them.
 
+Test Play keeps the strict CSP on the studio page. The `/play/*` rule swaps in a
+relaxed policy (`unsafe-inline`/`unsafe-eval`, `blob:`) and
+`Cross-Origin-Embedder-Policy: credentialless`, because the studio page is
+cross-origin isolated and a nested frame must opt in. The untrusted game only
+ever runs in a sandboxed frame with an opaque origin — `allow-same-origin` is
+never granted — and the studio page itself never embeds a `blob:` frame.
+
 ## Limitations
 
 - Desktop Chromium is the primary target. Firefox may work without the Linux
   panel; Safari's COEP/worker behavior is not validated.
+- The Test Play frame has an opaque origin, so `localStorage` and `document.cookie`
+  are unavailable to the previewed code. Use `fetch()` for data instead.
 - The MVP uses command-scoped workspace sync, not a live shared filesystem.
   The guest preopen does not persist POSIX mode bits, so each command copies the
   workspace to `/tmp/flaxia-work` and restores execute bits there. Long-running

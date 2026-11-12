@@ -13,6 +13,7 @@ export interface ShellHost {
   clearLinuxCache(): void;
   exportWorkspace(): void;
   linuxReady(): boolean;
+  runTestPlay(): void;
   runLinux(
     command: string,
     cwd: string,
@@ -20,7 +21,7 @@ export interface ShellHost {
   ): Promise<{ exitCode: number; durationMs: number }>;
 }
 
-const LOCAL_ONLY = new Set(['help', 'cd', 'clear', 'boot', 'vm', 'clear-cache', 'export', 'edit']);
+const LOCAL_ONLY = new Set(['help', 'cd', 'clear', 'boot', 'vm', 'clear-cache', 'export', 'edit', 'play']);
 
 interface CommandContext {
   args: string[];
@@ -115,7 +116,7 @@ export class StudioShell {
   private banner(): string {
     return [
       '\x1b[38;2;16;185;129mFlaxia Studio\x1b[0m  workspace shell',
-      '\x1b[38;2;100;116;139mType `help` for commands. The Linux VM is booted separately from the container panel.\x1b[0m',
+      '\x1b[38;2;100;116;139mType `help` for commands. `play` runs Test Play; the Linux VM boots from the container panel.\x1b[0m',
       '',
     ].join('\r\n');
   }
@@ -350,7 +351,7 @@ export class StudioShell {
             '',
             ...rows,
             '',
-            'The shell edits the same browser workspace as Monaco. Type `boot` to start Linux.',
+            'The shell edits the same browser workspace as Monaco. Type `play` to run Test Play, `boot` to start Linux.',
           ].join('\n');
         },
       },
@@ -508,6 +509,14 @@ export class StudioShell {
         summary: 'Fetch a URL through the browser Fetch proxy',
         usage: 'fetch <url>',
         run: () => 'usage: fetch <url>',
+      },
+      {
+        name: 'play',
+        summary: 'Run Test Play on the workspace',
+        run: () => {
+          this.shellHost.runTestPlay();
+          return 'Requested Test Play. Watch the preview pane and the run pill.';
+        },
       },
       {
         name: 'boot',

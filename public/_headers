@@ -7,6 +7,20 @@
   Permissions-Policy: camera=(), microphone=(), geolocation=()
   Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
 
+# Test Play shell — the only document that embeds untrusted game content
+# (sandboxed iframe, never allow-same-origin). The studio page is cross-origin
+# isolated (COEP: require-corp), so the shell must opt in with `credentialless`
+# to stay embeddable; the strict studio CSP is replaced with the relaxed game
+# CSP. SYNC: keep this CSP identical to vite.config.ts (PLAY_CSP) and
+# scripts/serve-dist.mjs (gameCsp).
+/play/*
+  ! Content-Security-Policy
+  ! Cross-Origin-Embedder-Policy
+  Cross-Origin-Embedder-Policy: credentialless
+  Cross-Origin-Resource-Policy: cross-origin
+  Access-Control-Allow-Origin: *
+  Content-Security-Policy: default-src 'self' * data: blob:; script-src 'self' * data: blob: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; worker-src 'self' * data: blob:; style-src 'self' * data: blob: 'unsafe-inline'; img-src 'self' * data: blob:; font-src 'self' * data: blob:; media-src 'self' * data: blob:; connect-src 'self' * data: blob:; frame-src 'self' * data: blob:; child-src 'self' * data: blob:; object-src 'none'; base-uri *; form-action *; frame-ancestors 'self'
+
 /linux/manifest.json
   Cache-Control: no-cache
 

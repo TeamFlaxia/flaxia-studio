@@ -33,6 +33,24 @@ const csp = [
   "form-action 'self'",
   "frame-ancestors 'none'",
 ].join('; ');
+// SYNC: relaxed CSP for the Test Play shell — keep identical to
+// public/_headers (`/play/*`) and vite.config.ts (PLAY_CSP).
+const gameCsp = [
+  "default-src 'self' * data: blob:",
+  "script-src 'self' * data: blob: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
+  "worker-src 'self' * data: blob:",
+  "style-src 'self' * data: blob: 'unsafe-inline'",
+  "img-src 'self' * data: blob:",
+  "font-src 'self' * data: blob:",
+  "media-src 'self' * data: blob:",
+  "connect-src 'self' * data: blob:",
+  "frame-src 'self' * data: blob:",
+  "child-src 'self' * data: blob:",
+  "object-src 'none'",
+  'base-uri *',
+  'form-action *',
+  "frame-ancestors 'self'",
+].join('; ');
 
 createServer((req, res) => {
   const urlPath = decodeURIComponent((req.url ?? '/').split('?')[0]);
@@ -43,11 +61,23 @@ createServer((req, res) => {
     return;
   }
   if (!existsSync(file) || statSync(file).isDirectory()) file = join(root, 'index.html');
+  const isPlay = urlPath.startsWith('/play/');
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
-  res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  if (isPlay) {
+    // The studio page is cross-origin isolated (COEP: require-corp), so a
+    // nested frame must opt in: `credentialless` keeps the shell embeddable
+    // while still allowing the sandboxed blob: game document. The game frame
+    // has an opaque origin, so /play assets are readable cross-origin.
+    res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Content-Security-Policy', gameCsp);
+  } else {
+    res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+    res.setHeader('Content-Security-Policy', csp);
+  }
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Content-Security-Policy', csp);
   res.setHeader('Content-Type', types[extname(file)] ?? 'application/octet-stream');
   res.writeHead(200);
   createReadStream(file).pipe(res);

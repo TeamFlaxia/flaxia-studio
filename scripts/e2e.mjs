@@ -63,6 +63,21 @@ const download = await downloadPromise;
 await download.saveAs(downloadPath);
 console.log('export bytes:', readFileSync(downloadPath).byteLength);
 
+// Test Play
+await page.locator('.run-pill').click();
+await page.waitForTimeout(2000);
+console.log('play frame:', await page.locator('.play-frame').count());
+console.log(
+  'play h1:',
+  await page
+    .frameLocator('.play-frame')
+    .frameLocator('.game-frame')
+    .locator('h1')
+    .innerText()
+    .catch(() => 'unavailable'),
+);
+console.log('play pane:', await page.locator('.play-pane:not(.hidden)').count());
+
 // Settings: dark + font size + manifest
 await page.locator('.topbar button[aria-label="Settings"]').click();
 await page.locator('.dialog select').first().selectOption('dark');

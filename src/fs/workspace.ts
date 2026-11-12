@@ -71,7 +71,7 @@ export class Workspace {
     this.entries.set('', this.dirEntry(''));
     this.entries.set('README.md', this.fileEntry('README.md', SAMPLE_README));
     this.entries.set('src', this.dirEntry('src'));
-    this.entries.set('src/main.ts', this.fileEntry('src/main.ts', SAMPLE_MAIN));
+    this.entries.set('src/main.js', this.fileEntry('src/main.js', SAMPLE_MAIN_JS));
     this.entries.set('src/style.css', this.fileEntry('src/style.css', SAMPLE_CSS));
     this.entries.set('index.html', this.fileEntry('index.html', SAMPLE_HTML));
     await this.persistAll();
@@ -346,33 +346,31 @@ export function displayWorkspaceName(name: string): string {
 
 const SAMPLE_README = `# Welcome to Flaxia Studio
 
-Flaxia Studio is a Monaco-based IDE that keeps the Flaxia design language:
-emerald accents, 1px hairlines, calm 150ms motion, and nothing that glows.
+Flaxia Studio is a browser IDE for web development that keeps the Flaxia
+design language: emerald accents, 1px hairlines, calm 150ms motion, and
+nothing that glows.
 
 ## Try this
 
-1. Open \`src/main.ts\` and edit the greeting.
-2. Press \`Ctrl/Cmd + K\` to open the command palette.
-3. Press \`Ctrl/Cmd + \`\` to focus the terminal and run \`help\`.
-4. Boot Linux from the container panel when an image is configured.
+1. Press \`Ctrl/Cmd + Shift + Enter\` to run **Test Play** on \`index.html\`.
+2. Edit \`src/main.js\` — the sandboxed preview reloads after each save.
+3. Press \`Ctrl/Cmd + K\` to open the command palette.
+4. Press \`Ctrl/Cmd + \`\` to focus the terminal and run \`help\`.
+5. Boot Linux from the container panel when you need a real shell.
 
 Everything you create is stored in this browser (IndexedDB). Use
 **Export ZIP** from the command palette to take it with you.
 `;
 
-const SAMPLE_MAIN = `type Greeting = {
-  message: string;
-  accent: string;
-};
-
-const greeting: Greeting = {
+const SAMPLE_MAIN_JS = `const greeting = {
   message: 'Hello from Flaxia Studio',
   accent: '#10b981',
 };
 
-export function render(target: HTMLElement, value: Greeting): void {
-  target.textContent = value.message;
-  target.style.color = value.accent;
+const heading = document.querySelector('h1');
+if (heading) {
+  heading.textContent = greeting.message;
+  heading.style.color = greeting.accent;
 }
 
 console.log(greeting.message);
@@ -405,11 +403,11 @@ const SAMPLE_HTML = `<!doctype html>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Flaxia Studio sample</title>
-    <link rel="stylesheet" href="/src/style.css" />
+    <link rel="stylesheet" href="./src/style.css" />
   </head>
   <body>
     <h1>Hello from Flaxia Studio</h1>
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module" src="./src/main.js"></script>
   </body>
 </html>
 `;

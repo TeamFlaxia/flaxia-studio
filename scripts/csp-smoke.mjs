@@ -17,6 +17,23 @@ await page.keyboard.press('Control+KeyK');
 await page.waitForTimeout(200);
 console.log('palette:', await page.locator('.cmd-dialog').count());
 await page.keyboard.press('Escape');
+
+// Test Play: the shell loads under the relaxed /play/* headers and the game
+// runs in a sandboxed frame with an opaque origin.
+await page.locator('.run-pill').click();
+await page.waitForTimeout(2500);
+console.log('play frame:', await page.locator('.play-frame').count());
+console.log(
+  'play h1:',
+  await page
+    .frameLocator('.play-frame')
+    .frameLocator('.game-frame')
+    .locator('h1')
+    .innerText()
+    .catch(() => 'unavailable'),
+);
+console.log('play pill:', await page.locator('.run-pill').getAttribute('data-state'));
+
 await page.locator('.vm-pill').click();
 for (let i = 0; i < 30; i++) {
   await page.waitForTimeout(1000);
