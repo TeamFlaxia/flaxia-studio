@@ -1,3 +1,5 @@
+export type BottomPanelTab = 'timeline' | 'terminal';
+
 export interface Settings {
   theme: 'light' | 'dark' | 'system';
   fontSize: number;
@@ -8,6 +10,7 @@ export interface Settings {
   playAutoReload: boolean;
   linuxNetwork: boolean;
   linuxManifestUrl: string;
+  defaultBottomTab: BottomPanelTab;
 }
 
 const SETTINGS_KEY = 'flaxia_studio_settings';
@@ -22,6 +25,7 @@ export const DEFAULT_SETTINGS: Settings = {
   playAutoReload: true,
   linuxNetwork: true,
   linuxManifestUrl: 'auto',
+  defaultBottomTab: 'timeline',
 };
 
 export function loadSettings(): Settings {
@@ -34,6 +38,7 @@ export function loadSettings(): Settings {
       ...parsed,
       fontSize: clamp(parsed.fontSize ?? DEFAULT_SETTINGS.fontSize, 10, 28),
       tabSize: clamp(parsed.tabSize ?? DEFAULT_SETTINGS.tabSize, 1, 8),
+      defaultBottomTab: parsed.defaultBottomTab === 'terminal' ? 'terminal' : 'timeline',
     };
     // v0.1 shipped with this as the implicit default. Auto still tries the
     // production manifest first, then falls back to the lite/full demos.

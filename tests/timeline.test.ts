@@ -14,6 +14,7 @@ import {
   registerAsset,
   removeClip,
   serializeTimeline,
+  setAdjustments,
   snapMs,
   splitClip,
   timelineDuration,
@@ -260,4 +261,49 @@ test('the document round-trips through JSON and drops garbage', () => {
   assert.equal(messy.tracks.length, 1);
   assert.equal(messy.tracks[0]?.clips.length, 0);
   assert.equal(Object.keys(messy.assets).length, 1);
+});
+
+test('adjustments round-trip through JSON and default values are dropped', () => {
+  let doc = docWithTracks();
+  doc = setAdjustments(doc, 'a.mp4', {
+    brightness: 120,
+    contrast: 90,
+    saturation: 140,
+    rotate: 90,
+    flip: true,
+  });
+  assert.deepEqual(doc.adjustments['a.mp4'], {
+    brightness: 120,
+    contrast: 90,
+    saturation: 140,
+    rotate: 90,
+    flip: true,
+  });
+
+  const restored = parseTimeline(JSON.parse(serializeTimeline(doc)));
+  assert.deepEqual(restored.adjustments['a.mp4'], doc.adjustments['a.mp4']);
+
+  doc = setAdjustments(doc, 'a.mp4', {
+    brightness: 100,
+    contrast: 100,
+    saturation: 100,
+    rotate: 0,
+    flip: false,
+  });
+  assert.equal(doc.adjustments['a.mp4'], undefined);
+});
+
+test('parseTimeline sanitizes out-of-range adjustments', () => {
+  const restored = parseTimeline({
+    adjustments: {
+      'a.mp4': { brightness: 900, contrast: -10, saturation: 50, rotate: 45, flip: true },
+    },
+  });
+  const adjustments = restored.adjustments['a.mp4'];
+  assert.ok(adjustments);
+  assert.equal(adjustments.brightness, 200);
+  assert.equal(adjustments.contrast, 0);
+  assert.equal(adjustments.saturation, 50);
+  assert.equal(adjustments.rotate, 0);
+  assert.equal(adjustments.flip, true);
 });

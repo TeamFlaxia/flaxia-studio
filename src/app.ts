@@ -17,6 +17,7 @@ import { el, formatBytes, iconButton } from './lib/dom';
 import { fileIcon, type IconName, icon } from './lib/icons';
 import {
   applyLayoutSizes,
+  clampInspectorWidth,
   clampSidebarWidth,
   type LayoutSizes,
   loadLayoutSizes,
@@ -34,15 +35,25 @@ import { bindDragHandle, bindSeparatorKeys } from './lib/resize';
 import { loadSettings, type Settings, saveSettings } from './lib/settings';
 import { matchesShortcut, modShortcut } from './lib/shortcut';
 import { cycleTheme, getTheme, initTheme, setTheme, themeLabel } from './lib/theme';
-import { addClip, addTrack, type MediaAsset, MIN_CLIP_MS, setAdjustments, trackEnd } from './lib/timeline';
+import {
+  addClip,
+  addTrack,
+  clipEnd,
+  type MediaAsset,
+  MIN_CLIP_MS,
+  setAdjustments,
+  trackEnd,
+} from './lib/timeline';
 import { LinuxRuntime, type LinuxStatus } from './linux/runtime';
 import { PlayHost, type PlayStatus, PlayStopped } from './play/host';
 import { isPlayPayloadPath, type PlayFile, type PlayPayload, validatePlayFiles } from './play/policy';
 import { StudioShell } from './terminal/shell';
 import { showContextMenu } from './ui/context-menu';
 import { confirmDialog, openDialog, promptDialog } from './ui/dialog';
+import { InspectorView } from './ui/inspector';
 import { MediaView } from './ui/media-view';
 import { isPaletteOpen, openPalette, type PaletteItem } from './ui/palette';
+import { PreviewView } from './ui/preview-view';
 import { TimelineStore } from './ui/timeline-store';
 import { TimelineView } from './ui/timeline-view';
 import { toast } from './ui/toast';
@@ -93,9 +104,14 @@ export class App implements ShellHostish {
   private editorMain!: HTMLElement;
   private editorColumn!: HTMLElement;
   private mediaPane!: HTMLElement;
+  private inspectorResizer!: HTMLElement;
+  private inspectorButton!: HTMLButtonElement;
+  private previewPane!: HTMLElement;
   private mediaView: MediaView;
+  private inspector: InspectorView;
   private timelineStore: TimelineStore;
   private timeline: TimelineView;
+  private previewView: PreviewView;
   private playPane!: HTMLElement;
   private playHead!: HTMLElement;
   private playStatus!: HTMLElement;
@@ -118,8 +134,9 @@ export class App implements ShellHostish {
   private selectedPath: string | null = null;
   private collapsedDirs = new Set<string>();
   private sidebarView: SidebarView = 'explorer';
-  private panelView: PanelView = 'terminal';
+  private panelView: PanelView = 'timeline';
   private panelVisible = true;
+  private inspectorVisible = true;
   private sidebarVisible = !window.matchMedia?.('(max-width: 720px)').matches;
   private searchQuery = '';
   private searchResults: SearchResult[] = [];
@@ -129,7 +146,7 @@ export class App implements ShellHostish {
   private warnedApkCors = false;
   private lastLinuxStatus: LinuxStatus;
   private linuxUnsubscribe: (() => void) | null = null;
-  private activeView: 'editor' | 'play' | 'media' = 'editor';
+  private activeView: 'editor' | 'play' | 'media' | 'preview' = 'editor';
   private timelinePlayheadMs = 0;
   private playHasRun = false;
   private playStatusState: PlayStatus = 'idle';
@@ -139,6 +156,7 @@ export class App implements ShellHostish {
   constructor(workspace: Workspace) {
     this.workspace = workspace;
     this.settings = loadSettings();
+    this.panelView = this.settings.defaultBottomTab;
     this.lastLinuxStatus = this.linux.status();
     this.editorHost = el('div', { class: 'editor-host', attrs: { 'aria-label': 'Editor' } });
     this.editor = new EditorManager(this.editorHost);
@@ -150,17 +168,48 @@ export class App implements ShellHostish {
     this.timelineStore = new TimelineStore(this.workspace, () => this.handleTimelineChange());
     this.mediaView = new MediaView({
       onAddToTimeline: (path) => void this.addMediaToTimeline(path),
-      onAdjustmentsChange: (path, adjustments) => {
-        this.timelineStore.updateWith((doc) => setAdjustments(doc, path, adjustments));
+    });
+    this.previewView = new PreviewView({
+      workspace: this.workspace,
+      onSeek: (ms) => {
+        this.timelinePlayheadMs = ms;
+        this.timeline.seekTo(ms);
       },
+      onPlay: () => this.timeline.pausePlayback(),
     });
     this.timeline = new TimelineView({
       store: this.timelineStore,
       workspace: this.workspace,
       onPlayheadChange: (ms) => {
         this.timelinePlayheadMs = ms;
+        this.previewView.setPlayhead(ms);
       },
       onOpenSource: (path) => this.openFile(path),
+      onSelectedClipChange: (path) => {
+        if (!path) {
+          this.inspector.clear();
+          return;
+        }
+        const doc = this.timelineStore.current;
+        this.inspector.showSource({
+          path,
+          kind: mediaKind(path) ?? undefined,
+          adjustments: doc?.adjustments[path],
+        });
+      },
+      onPlaybackChange: (playing) => {
+        if (playing) this.previewView.pause();
+      },
+      onAddFile: (startMs, trackId) => this.pickTimelineFile(startMs, trackId),
+      onDropFile: (path, startMs, trackId) => void this.dropFileOnTimeline(path, startMs, trackId),
+      onDropFiles: (files, startMs, trackId) => void this.addDroppedFilesToTimeline(files, startMs, trackId),
+    });
+    this.inspector = new InspectorView({
+      onAdjustmentsChange: (path, adjustments) => {
+        this.timelineStore.updateWith((doc) => setAdjustments(doc, path, adjustments));
+        if (this.mediaView.currentSourcePath === path) this.mediaView.setAdjustments(adjustments);
+        this.previewView.refresh();
+      },
     });
     this.linux.setManifestUrl(this.settings.linuxManifestUrl);
     this.linux.setNetworkEnabled(this.settings.linuxNetwork);
@@ -175,6 +224,8 @@ export class App implements ShellHostish {
     initTheme();
     setTheme(this.settings.theme);
     applyLayoutSizes(this.layoutSizes);
+    this.inspectorVisible =
+      this.layoutSizes.inspectorVisible ?? !window.matchMedia?.('(max-width: 900px)').matches;
     this.root = root;
     this.buildShell();
     installMonacoShadowStyles();
@@ -194,7 +245,9 @@ export class App implements ShellHostish {
     });
     this.editor.setTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
     this.playHost.mount(this.playBody);
-    void this.timeline.init();
+    void this.timeline.init().then(() => {
+      this.previewView.setDoc(this.timelineStore.current);
+    });
     this.shell.mount();
     this.shell.setTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
     this.linuxUnsubscribe = this.linux.subscribe((status) => this.handleLinuxStatus(status));
@@ -208,6 +261,7 @@ export class App implements ShellHostish {
     window.addEventListener('resize', () => this.layout());
     window.addEventListener('pagehide', () => {
       this.timeline.dispose();
+      this.previewView.dispose();
       void this.timelineStore.flush();
       if (this.playReloadTimer !== undefined) window.clearTimeout(this.playReloadTimer);
       this.playHost.dispose();
@@ -273,22 +327,38 @@ export class App implements ShellHostish {
     this.playBody.appendChild(this.playEmpty);
     this.playPane.append(this.playHead, this.playBody);
     this.mediaPane = el('div', { class: 'media-pane hidden' }, [this.mediaView.host]);
-    this.editorMain = el('div', { class: 'editor-main' }, [this.editorColumn, this.mediaPane, this.playPane]);
+    this.previewPane = el('div', { class: 'preview-pane hidden' }, [this.previewView.host]);
+    this.editorMain = el('div', { class: 'editor-main' }, [
+      this.editorColumn,
+      this.mediaPane,
+      this.playPane,
+      this.previewPane,
+    ]);
     this.editorArea = el('main', { class: 'editor-area' }, [this.tabsBar, this.breadcrumbs, this.editorMain]);
+
+    this.inspectorResizer = el('div', {
+      class: 'inspector-resizer',
+      attrs: {
+        role: 'separator',
+        'aria-orientation': 'vertical',
+        'aria-label': 'Resize inspector',
+        tabindex: '0',
+      },
+    });
 
     const body = el('div', { class: 'studio-body' }, [
       this.rail,
       this.sidebar,
       this.sidebarResizer,
       this.editorArea,
+      this.inspectorResizer,
+      this.inspector.host,
     ]);
 
     this.panel = el('section', { class: 'panel', attrs: { 'aria-label': 'Panel' } });
     this.panelHead = el('div', { class: 'panel-head' });
     this.panelBody = el('div', { class: 'panel-body' });
-    this.terminalView = el('div', { class: 'panel-view is-active', dataset: { view: 'terminal' } }, [
-      this.shell.host,
-    ]);
+    this.terminalView = el('div', { class: 'panel-view', dataset: { view: 'terminal' } }, [this.shell.host]);
     this.outputView = el('div', { class: 'panel-view output-view', dataset: { view: 'output' } });
     this.problemsView = el('div', { class: 'panel-view problems-view', dataset: { view: 'problems' } }, [
       el('div', { class: 'terminal-note' }, [
@@ -300,6 +370,7 @@ export class App implements ShellHostish {
       this.timeline.host,
     ]);
     this.panelBody.append(this.terminalView, this.outputView, this.problemsView, this.timelineView);
+    this.applyPanelView();
     const resizer = el('div', { class: 'panel-resizer', attrs: { 'aria-hidden': 'true' } });
     this.panel.append(resizer, this.panelHead, this.panelBody);
 
@@ -348,6 +419,7 @@ export class App implements ShellHostish {
     this.buildStatusbar();
     this.bindResizer(resizer);
     this.bindSidebarResizer();
+    this.bindInspectorResizer();
     this.bindDropZone();
   }
 
@@ -426,9 +498,13 @@ export class App implements ShellHostish {
     this.renderTopbarTheme(themeButton);
 
     const settingsButton = iconButton('settings', 'Settings', () => void this.openSettings());
+    this.inspectorButton = iconButton('panel-right', 'Toggle inspector', () => this.toggleInspector(), {
+      pressed: this.inspectorVisible,
+    });
     const actions = el('div', { class: 'topbar-actions' }, [
       this.runPill,
       this.vmPill,
+      this.inspectorButton,
       iconButton('terminal', 'Toggle panel', () => this.togglePanel()),
       themeButton,
       settingsButton,
@@ -519,10 +595,16 @@ export class App implements ShellHostish {
     this.renderBreadcrumbs();
     this.renderWelcome();
     this.renderPanelHead();
+    this.applyPanelView();
     this.renderOutput();
     this.renderStatus();
     this.sidebar.classList.toggle('hidden', !this.sidebarVisible);
     this.sidebarResizer.classList.toggle('hidden', !this.sidebarVisible);
+    this.inspector.host.classList.toggle('hidden', !this.inspectorVisible);
+    this.inspectorResizer.classList.toggle('hidden', !this.inspectorVisible);
+    if (this.inspectorButton) {
+      this.inspectorButton.setAttribute('aria-pressed', String(this.inspectorVisible));
+    }
     this.root.classList.toggle('is-panel-hidden', !this.panelVisible);
     this.renderLinuxCard();
   }
@@ -597,6 +679,7 @@ export class App implements ShellHostish {
             attrs: {
               'aria-selected': String(this.activePath === node.path),
               'aria-expanded': node.type === 'dir' ? String(open) : undefined,
+              draggable: node.type === 'file' && isMediaPath(node.path) ? 'true' : undefined,
               title: node.path,
               style: `--depth:${depth}`,
             },
@@ -610,6 +693,15 @@ export class App implements ShellHostish {
                 } else {
                   this.openFile(node.path);
                 }
+              },
+              dragstart: (event) => {
+                if (node.type !== 'file' || !isMediaPath(node.path)) {
+                  event.preventDefault();
+                  return;
+                }
+                event.dataTransfer?.setData('application/x-flaxia-file', node.path);
+                event.dataTransfer?.setData('text/plain', node.path);
+                if (event.dataTransfer) event.dataTransfer.effectAllowed = 'copy';
               },
               contextmenu: (event) => {
                 event.preventDefault();
@@ -835,7 +927,7 @@ export class App implements ShellHostish {
   private renderTabs(): void {
     this.tabsBar.replaceChildren();
     for (const path of this.openTabs) {
-      const active = path === this.activePath;
+      const active = this.activeView === 'editor' && path === this.activePath;
       const dirty = this.editor.isDirty(path);
       const tab = el(
         'div',
@@ -896,10 +988,38 @@ export class App implements ShellHostish {
       );
       this.tabsBar.appendChild(tab);
     }
+    this.tabsBar.appendChild(this.buildPreviewTab());
     this.tabsBar.appendChild(this.buildPlayTab());
     this.tabsBar.appendChild(el('div', { class: 'tab-spacer' }));
     this.tabsBar.appendChild(
       iconButton('plus', 'New file', () => void this.newFile(), { size: 14, className: 'tab-new' }),
+    );
+  }
+
+  /** The timeline preview lives in the tab bar next to the file tabs. */
+  private buildPreviewTab(): HTMLElement {
+    const active = this.activeView === 'preview';
+    return el(
+      'div',
+      {
+        class: `tab tab-preview ${active ? 'is-active' : ''}`.trim(),
+        role: 'tab',
+        attrs: {
+          'aria-selected': String(active),
+          tabindex: active ? '0' : '-1',
+          title: 'Timeline preview (video)',
+        },
+        on: {
+          click: () => this.setActiveView('preview'),
+          keydown: (event) => {
+            if (event.key === 'Enter' || event.key === ' ') this.setActiveView('preview');
+          },
+        },
+      },
+      [
+        el('span', { class: 'tab-icon' }, [icon('monitor', 14)]),
+        el('span', { class: 'tab-label', text: 'Preview' }),
+      ],
     );
   }
 
@@ -914,7 +1034,7 @@ export class App implements ShellHostish {
         attrs: {
           'aria-selected': String(active),
           tabindex: active ? '0' : '-1',
-          title: 'Test Play preview',
+          title: 'Test Play preview (web project)',
         },
         on: {
           click: () => this.setActiveView('play'),
@@ -934,15 +1054,21 @@ export class App implements ShellHostish {
 
   /**
    * The editor area shows one view at a time: the text editor, a media
-   * preview, or the Test Play preview. Media and Test Play are tabs.
+   * preview, the Test Play preview, or the timeline preview monitor.
    */
-  private setActiveView(view: 'editor' | 'play' | 'media'): void {
+  private setActiveView(view: 'editor' | 'play' | 'media' | 'preview'): void {
     const changed = this.activeView !== view;
     this.activeView = view;
+    this.previewView.setActive(view === 'preview');
     this.editorColumn.classList.toggle('hidden', view !== 'editor');
     this.mediaPane.classList.toggle('hidden', view !== 'media');
     this.playPane.classList.toggle('hidden', view !== 'play');
+    this.previewPane.classList.toggle('hidden', view !== 'preview');
     this.playEmpty.classList.toggle('hidden', this.playHasRun);
+    if (view === 'preview') {
+      this.previewView.setDoc(this.timelineStore.current);
+      this.previewView.setPlayhead(this.timelinePlayheadMs);
+    }
     this.renderTabs();
     this.renderBreadcrumbs();
     if (changed) this.layout();
@@ -952,6 +1078,10 @@ export class App implements ShellHostish {
     this.breadcrumbs.replaceChildren();
     if (this.activeView === 'play') {
       this.breadcrumbs.appendChild(el('span', { text: 'Test Play' }));
+      return;
+    }
+    if (this.activeView === 'preview') {
+      this.breadcrumbs.appendChild(el('span', { text: 'Preview' }));
       return;
     }
     if (!this.activePath) {
@@ -1098,24 +1228,45 @@ export class App implements ShellHostish {
     this.selectedPath = path;
     this.welcome.classList.add('hidden');
     const doc = await this.timelineStore.load();
+    const kind = mediaKind(path);
     await this.mediaView.show({
       path,
       blob,
       size: this.workspace.sizeOf(path),
       adjustments: doc.adjustments[path],
     });
+    if (kind) {
+      this.inspector.showSource({
+        path,
+        kind,
+        size: this.workspace.sizeOf(path),
+        mime: blob.type || mimeForMedia(path),
+        width: doc.assets[path]?.width,
+        height: doc.assets[path]?.height,
+        durationMs: doc.assets[path]?.durationMs,
+        adjustments: doc.adjustments[path],
+      });
+    }
     this.setActiveView('media');
     this.renderExplorer();
     this.renderSidebar();
     this.renderStatus();
     await this.ensureTimelineAsset(path, blob);
+    const asset = this.timelineStore.current?.assets[path];
+    this.inspector.updateDetails({
+      size: this.workspace.sizeOf(path),
+      mime: blob.type || mimeForMedia(path),
+      width: asset?.width,
+      height: asset?.height,
+      durationMs: asset?.durationMs,
+    });
   }
 
   /** Probes a media file once so the timeline can place it. */
-  private async ensureTimelineAsset(path: string, blob: Blob): Promise<void> {
+  private async ensureTimelineAsset(path: string, blob: Blob, force = false): Promise<void> {
     const kind = mediaKind(path);
     if (!kind) return;
-    if (this.timelineStore.current?.assets[path]) return;
+    if (!force && this.timelineStore.current?.assets[path]) return;
     const probe = await probeMedia(blob, kind);
     const durationMs =
       kind === 'image'
@@ -1156,6 +1307,129 @@ export class App implements ShellHostish {
     this.timelineStore.update(doc);
     this.showTimeline();
     toast('Added to timeline', basename(path), 'success', 1400);
+  }
+
+  /** Opens a media picker for the timeline's "Add File…" command. */
+  private pickTimelineFile(startMs: number, trackId: string | null): void {
+    const paths = this.workspace.filePaths().filter((path) => isMediaPath(path));
+    if (paths.length === 0) {
+      toast('No media files', 'Import an image, video or audio file first.', 'warning');
+      return;
+    }
+    const items = paths.map((path) => ({
+      id: `timeline:${path}`,
+      label: path,
+      group: dirname(path) || 'root',
+      icon: fileIcon(path),
+      run: () => {
+        void this.addFileToTimeline(path, startMs, trackId).then((end) => {
+          if (end === null) return;
+          this.showTimeline();
+          toast('Added to timeline', basename(path), 'success', 1400);
+        });
+      },
+    }));
+    openPalette(items, {
+      placeholder: 'Add media to timeline…',
+      emptyText: 'No media files in this workspace.',
+      prefix: 'file-video',
+      footer: `${items.length} media file${items.length === 1 ? '' : 's'}`,
+    });
+  }
+
+  /** A workspace file dropped from the explorer. */
+  private async dropFileOnTimeline(path: string, startMs: number, trackId: string | null): Promise<void> {
+    const end = await this.addFileToTimeline(path, startMs, trackId);
+    if (end === null) return;
+    this.showTimeline();
+    toast('Added to timeline', basename(path), 'success', 1400);
+  }
+
+  /**
+   * Places a media file on the timeline, probing and registering the asset
+   * first when the file has never been opened.
+   */
+  private async addFileToTimeline(
+    path: string,
+    startMs: number,
+    trackId: string | null,
+  ): Promise<number | null> {
+    const kind = mediaKind(path);
+    if (!kind) {
+      toast('Cannot add to timeline', `${basename(path)} is not an image, video or audio file.`, 'warning');
+      return null;
+    }
+    await this.timelineStore.load();
+    const blob = await this.workspace.readBlob(path);
+    if (!blob) {
+      toast('Cannot add to timeline', `${path} has no payload.`, 'warning');
+      return null;
+    }
+    const existing = this.timelineStore.current?.assets[path];
+    await this.ensureTimelineAsset(path, blob, !existing || existing.durationMs < MIN_CLIP_MS);
+
+    let doc = this.timelineStore.current;
+    if (!doc) return null;
+    const asset = doc.assets[path];
+    if (!asset || asset.durationMs < MIN_CLIP_MS) {
+      toast('Cannot add to timeline', 'The media duration is unknown.', 'warning');
+      return null;
+    }
+    const trackKind = trackKindFor(asset.kind);
+    let track = trackId
+      ? doc.tracks.find((entry) => entry.id === trackId && entry.kind === trackKind)
+      : undefined;
+    if (!track) track = doc.tracks.find((entry) => entry.kind === trackKind);
+    if (!track) {
+      doc = addTrack(doc, trackKind);
+      track = doc.tracks[doc.tracks.length - 1];
+    }
+    if (!track) return null;
+
+    const start = Math.max(0, Math.round(startMs));
+    doc = addClip(doc, track.id, path, start);
+    this.timelineStore.update(doc);
+    const added = doc.tracks
+      .flatMap((entry) => entry.clips)
+      .find((clip) => clip.path === path && clip.startMs === start);
+    return added ? clipEnd(added) : start + asset.durationMs;
+  }
+
+  /** Media files dropped from the operating system onto the timeline. */
+  private async addDroppedFilesToTimeline(
+    files: File[],
+    startMs: number,
+    trackId: string | null,
+  ): Promise<void> {
+    const existing = new Set(this.workspace.filePaths());
+    let cursor = startMs;
+    let added = 0;
+    for (const file of files) {
+      const name = normalizePath(file.name || 'media') || 'media';
+      if (!isMediaPath(name)) {
+        toast('Skipped', `${file.name} is not media.`, 'warning');
+        continue;
+      }
+      const path = uniquePath(existing, name);
+      existing.add(path);
+      try {
+        await this.workspace.writeBinaryFile(path, file, file.type || mimeForMedia(path));
+        const end = await this.addFileToTimeline(path, cursor, trackId);
+        if (end !== null) {
+          cursor = end;
+          added += 1;
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        toast('Drop failed', `${file.name}: ${message}`, 'error');
+      }
+    }
+    this.renderExplorer();
+    if (added > 0) {
+      this.showTimeline();
+      this.log(`Added ${added} dropped file(s) to the timeline.`);
+      toast('Added to timeline', `${added} file(s)`, 'success', 1600);
+    }
   }
 
   private async openBinaryFile(path: string): Promise<void> {
@@ -1482,22 +1756,29 @@ export class App implements ShellHostish {
   private bindDropZone(): void {
     let depth = 0;
     const carriesFiles = (event: DragEvent) => [...(event.dataTransfer?.types ?? [])].includes('Files');
+    const overTimeline = (event: DragEvent) =>
+      (event.target as HTMLElement | null)?.closest('.timeline') !== null;
 
     const show = (visible: boolean) => this.dropOverlay.classList.toggle('hidden', !visible);
 
     window.addEventListener('dragenter', (event) => {
       if (!carriesFiles(event)) return;
+      if (overTimeline(event)) {
+        depth = 0;
+        show(false);
+        return;
+      }
       event.preventDefault();
       depth += 1;
       show(true);
     });
     window.addEventListener('dragover', (event) => {
-      if (!carriesFiles(event)) return;
+      if (!carriesFiles(event) || overTimeline(event)) return;
       event.preventDefault();
       if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
     });
     window.addEventListener('dragleave', (event) => {
-      if (!carriesFiles(event)) return;
+      if (!carriesFiles(event) || overTimeline(event)) return;
       depth = Math.max(0, depth - 1);
       if (depth === 0 || event.relatedTarget === null) {
         depth = 0;
@@ -1506,6 +1787,11 @@ export class App implements ShellHostish {
     });
     window.addEventListener('drop', (event) => {
       if (!carriesFiles(event)) return;
+      if (overTimeline(event)) {
+        depth = 0;
+        show(false);
+        return;
+      }
       event.preventDefault();
       depth = 0;
       show(false);
@@ -1647,12 +1933,16 @@ export class App implements ShellHostish {
     this.panelView = view;
     this.panelVisible = true;
     this.root.classList.remove('is-panel-hidden');
-    for (const node of this.panelBody.querySelectorAll<HTMLElement>('[data-view]')) {
-      node.classList.toggle('is-active', node.dataset.view === view);
-    }
+    this.applyPanelView();
     this.renderPanelHead();
     this.layout();
     if (view === 'terminal') this.shell.focus();
+  }
+
+  private applyPanelView(): void {
+    for (const node of this.panelBody.querySelectorAll<HTMLElement>('[data-view]')) {
+      node.classList.toggle('is-active', node.dataset.view === this.panelView);
+    }
   }
 
   private togglePanel(): void {
@@ -1663,7 +1953,11 @@ export class App implements ShellHostish {
   }
 
   private handleTimelineChange(): void {
+    const doc = this.timelineStore.current;
     this.timeline.render();
+    this.previewView.setDoc(doc);
+    const path = this.inspector.sourcePath;
+    if (path) this.inspector.setAdjustments(path, doc?.adjustments[path] ?? {});
   }
 
   private showTimeline(): void {
@@ -1749,10 +2043,54 @@ export class App implements ShellHostish {
     this.syncResizerValues();
   }
 
+  /** Dragging the inspector border changes its width (it grows leftwards). */
+  private bindInspectorResizer(): void {
+    const handle = this.inspectorResizer;
+    let startWidth = 0;
+    bindDragHandle(handle, {
+      onStart: () => {
+        startWidth = this.inspector.host.getBoundingClientRect().width;
+      },
+      onDrag: ({ x }) => {
+        this.setInspectorWidth(clampInspectorWidth(startWidth - x, window.innerWidth));
+      },
+      onEnd: () => {
+        this.saveLayout();
+        this.layout();
+      },
+    });
+    bindSeparatorKeys(handle, {
+      axis: 'horizontal',
+      step: 16,
+      onStep: (delta) => {
+        const current = this.inspector.host.getBoundingClientRect().width;
+        this.setInspectorWidth(clampInspectorWidth(current - delta, window.innerWidth));
+      },
+    });
+  }
+
+  private setInspectorWidth(width: number): void {
+    this.layoutSizes.inspectorWidth = width;
+    document.documentElement.style.setProperty('--inspector-w', `${width}px`);
+    this.syncResizerValues();
+  }
+
+  private toggleInspector(): void {
+    this.inspectorVisible = !this.inspectorVisible;
+    this.layoutSizes.inspectorVisible = this.inspectorVisible;
+    this.render();
+    this.saveLayout();
+    this.layout();
+  }
+
   private syncResizerValues(): void {
     this.sidebarResizer.setAttribute(
       'aria-valuenow',
       String(Math.round(this.sidebar.getBoundingClientRect().width)),
+    );
+    this.inspectorResizer.setAttribute(
+      'aria-valuenow',
+      String(Math.round(this.inspector.host.getBoundingClientRect().width)),
     );
   }
 
@@ -2130,6 +2468,27 @@ export class App implements ShellHostish {
         run: () => this.showTerminal(),
       },
       {
+        id: 'view.timeline',
+        label: 'View: Focus Timeline',
+        group: 'View',
+        icon: 'panel-bottom',
+        run: () => this.showTimeline(),
+      },
+      {
+        id: 'view.inspector',
+        label: 'View: Toggle Inspector',
+        group: 'View',
+        icon: 'panel-right',
+        run: () => this.toggleInspector(),
+      },
+      {
+        id: 'view.preview',
+        label: 'View: Toggle Video Preview',
+        group: 'View',
+        icon: 'monitor',
+        run: () => this.setActiveView(this.activeView === 'preview' ? 'editor' : 'preview'),
+      },
+      {
         id: 'test.run',
         label: 'Test: Run Test Play',
         group: 'Test',
@@ -2236,6 +2595,16 @@ export class App implements ShellHostish {
         }),
       ),
     );
+    const bottomTabSelect = el('select', { class: 'select' }, [
+      el('option', {
+        text: 'Timeline',
+        attrs: { value: 'timeline', selected: this.settings.defaultBottomTab === 'timeline' },
+      }),
+      el('option', {
+        text: 'Terminal',
+        attrs: { value: 'terminal', selected: this.settings.defaultBottomTab === 'terminal' },
+      }),
+    ]);
     const normalizeManifest = (value: string) => value.replace(/^\//, '');
     const manifestOptions = [
       { value: 'auto', label: 'Auto (production → lite → full)' },
@@ -2312,6 +2681,10 @@ export class App implements ShellHostish {
         fontSize,
       ]),
       el('label', { class: 'field' }, [el('span', { class: 'field-label', text: 'Tab size' }), tabSize]),
+      el('label', { class: 'field' }, [
+        el('span', { class: 'field-label', text: 'Default bottom panel' }),
+        bottomTabSelect,
+      ]),
       el('div', { class: 'field' }, [
         el('span', { class: 'field-label', text: 'Editor' }),
         el('div', {}, [
@@ -2377,6 +2750,7 @@ export class App implements ShellHostish {
       linuxManifestUrl:
         manifestSelect.value === 'custom' ? manifest.value.trim() || 'auto' : manifestSelect.value,
       linuxNetwork: switches.get('linuxNetwork')?.getAttribute('aria-checked') === 'true',
+      defaultBottomTab: bottomTabSelect.value === 'terminal' ? 'terminal' : 'timeline',
     };
     this.settings = next;
     this.saveSettings();
@@ -2392,6 +2766,7 @@ export class App implements ShellHostish {
     this.lastLinuxStatus = this.linux.status();
     this.renderStatus();
     this.renderSidebar();
+    if (this.panelView !== next.defaultBottomTab) this.selectPanel(next.defaultBottomTab);
     this.log('Settings saved.');
     toast('Settings saved', 'Editor preferences applied.', 'success', 1800);
   }

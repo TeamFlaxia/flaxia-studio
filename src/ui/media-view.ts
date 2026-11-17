@@ -6,7 +6,7 @@
  * timeline document, so the preview and the timeline agree on them.
  */
 
-import { el, formatBytes, iconButton } from '../lib/dom';
+import { el, formatBytes } from '../lib/dom';
 import { fileIcon, icon } from '../lib/icons';
 import {
   DEFAULT_MEDIA_ADJUSTMENTS,
@@ -26,15 +26,7 @@ export interface MediaSource {
 export interface MediaViewOptions {
   /** Adds the current source to the timeline at the playhead. */
   onAddToTimeline: (path: string) => void;
-  /** Persists changed adjustments for a source path. */
-  onAdjustmentsChange: (path: string, adjustments: MediaAdjustments) => void;
 }
-
-const ADJUSTMENT_CONTROLS: Array<{ key: 'brightness' | 'contrast' | 'saturation'; label: string }> = [
-  { key: 'brightness', label: 'Brightness' },
-  { key: 'contrast', label: 'Contrast' },
-  { key: 'saturation', label: 'Saturation' },
-];
 
 export class MediaView {
   readonly host: HTMLElement;
@@ -43,12 +35,8 @@ export class MediaView {
   private readonly badge: HTMLElement;
   private readonly meta: HTMLElement;
   private readonly stage: HTMLElement;
-  private readonly controls: HTMLElement;
   private readonly empty: HTMLElement;
   private readonly addButton: HTMLButtonElement;
-  private readonly rotateButton: HTMLButtonElement;
-  private readonly flipButton: HTMLButtonElement;
-  private readonly sliders = new Map<string, HTMLInputElement>();
 
   private currentPath: string | null = null;
   private currentKind: MediaKind | null = null;
@@ -77,50 +65,20 @@ export class MediaView {
       { class: 'btn btn-primary media-add', type: 'button', on: { click: () => this.addToTimeline() } },
       [icon('plus', 13), 'Add to timeline'],
     ) as HTMLButtonElement;
-    this.rotateButton = iconButton('rotate-cw', 'Rotate 90°', () => this.rotate(), { size: 14 });
-    this.flipButton = iconButton('external', 'Flip horizontally', () => this.flip(), { size: 14 });
-
-    this.controls = el('div', { class: 'media-controls' });
-    for (const control of ADJUSTMENT_CONTROLS) {
-      const input = el('input', {
-        class: 'media-range',
-        type: 'range',
-        attrs: {
-          min: '0',
-          max: '200',
-          step: '1',
-          value: '100',
-          'aria-label': control.label,
-        },
-        on: { input: () => this.readSliders() },
-      }) as HTMLInputElement;
-      this.sliders.set(control.key, input);
-      this.controls.append(
-        el('label', { class: 'media-control' }, [
-          el('span', { class: 'media-control-label', text: control.label }),
-          input,
-        ]),
-      );
-    }
-
     const head = el('div', { class: 'media-head' }, [
       this.headIcon,
       this.title,
       this.badge,
       el('div', { class: 'media-head-spacer' }),
-      this.rotateButton,
-      this.flipButton,
-      iconButton('refresh', 'Reset adjustments', () => this.reset(), { size: 14 }),
       this.addButton,
     ]);
 
     this.host = el('div', { class: 'media-view', attrs: { 'aria-label': 'Media preview' } }, [
       head,
-      this.controls,
       el('div', { class: 'media-body' }, [this.stage, this.empty]),
       el('div', { class: 'media-foot' }, [this.meta]),
     ]);
-    this.setControls(null);
+    this.addButton.disabled = true;
   }
 
   /** Path currently on screen, or null after `clear()`. */
@@ -147,7 +105,7 @@ export class MediaView {
     this.empty.classList.add('hidden');
     this.host.dataset.kind = kind;
     this.headIcon.replaceChildren(icon(fileIcon(source.path), 13));
-    this.setControls(kind);
+    this.addButton.disabled = false;
 
     if (!sameSource) {
       this.releaseUrl();
@@ -163,7 +121,6 @@ export class MediaView {
         this.renderMeta(source.size, source.blob.type);
       });
     }
-    this.syncSliders();
     this.applyAdjustments();
     this.renderMeta(source.size, source.blob.type);
   }
@@ -184,7 +141,7 @@ export class MediaView {
     this.meta.textContent = '';
     this.host.dataset.kind = '';
     this.headIcon.replaceChildren(icon('file-image', 13));
-    this.setControls(null);
+    this.addButton.disabled = true;
   }
 
   private buildMedia(kind: MediaKind, url: string): HTMLImageElement | HTMLVideoElement | null {
@@ -232,59 +189,14 @@ export class MediaView {
     if (this.media) this.media.setAttribute('style', style);
   }
 
-  private syncSliders(): void {
-    for (const [key, input] of this.sliders) {
-      const value = this.adjustments[key as 'brightness' | 'contrast' | 'saturation'];
-      input.value = String(value);
-    }
-  }
-
-  private readSliders(): void {
-    const brightness = Number(this.sliders.get('brightness')?.value ?? 100);
-    const contrast = Number(this.sliders.get('contrast')?.value ?? 100);
-    const saturation = Number(this.sliders.get('saturation')?.value ?? 100);
-    this.adjustments = { ...this.adjustments, brightness, contrast, saturation };
+  /** Mirrors adjustments changed in the inspector. */
+  setAdjustments(adjustments: Partial<MediaAdjustments>): void {
+    this.adjustments = { ...DEFAULT_MEDIA_ADJUSTMENTS, ...adjustments };
     this.applyAdjustments();
-    this.emit();
-  }
-
-  private rotate(): void {
-    const next = ((this.adjustments.rotate + 90) % 360) as MediaAdjustments['rotate'];
-    this.adjustments = { ...this.adjustments, rotate: next };
-    this.applyAdjustments();
-    this.emit();
-  }
-
-  private flip(): void {
-    this.adjustments = { ...this.adjustments, flip: !this.adjustments.flip };
-    this.applyAdjustments();
-    this.emit();
-  }
-
-  private reset(): void {
-    this.adjustments = { ...DEFAULT_MEDIA_ADJUSTMENTS };
-    this.syncSliders();
-    this.applyAdjustments();
-    this.emit();
-  }
-
-  private emit(): void {
-    if (!this.currentPath) return;
-    this.options.onAdjustmentsChange(this.currentPath, { ...this.adjustments });
   }
 
   private addToTimeline(): void {
     if (this.currentPath) this.options.onAddToTimeline(this.currentPath);
-  }
-
-  /** Audio has no picture adjustments; every source can go to the timeline. */
-  private setControls(kind: MediaKind | null): void {
-    this.addButton.disabled = kind === null;
-    const adjustable = kind !== null && kind !== 'audio';
-    this.rotateButton.disabled = !adjustable;
-    this.flipButton.disabled = !adjustable;
-    for (const input of this.sliders.values()) input.disabled = !adjustable;
-    this.controls.classList.toggle('is-disabled', !adjustable);
   }
 
   private releaseUrl(): void {

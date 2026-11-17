@@ -41,6 +41,16 @@ export interface TimelineViewOptions {
   onPlayheadChange: (ms: number) => void;
   /** Opens a clip's source in the media preview. */
   onOpenSource: (path: string) => void;
+  /** Reports the source path of the selected clip, or null. */
+  onSelectedClipChange?: (path: string | null) => void;
+  /** Reports timeline playback so other monitors can pause. */
+  onPlaybackChange?: (playing: boolean) => void;
+  /** Opens the workspace media picker for the given drop position. */
+  onAddFile?: (startMs: number, trackId: string | null) => void;
+  /** Places a workspace file dropped from the explorer. */
+  onDropFile?: (path: string, startMs: number, trackId: string | null) => void;
+  /** Places media files dropped from the operating system. */
+  onDropFiles?: (files: File[], startMs: number, trackId: string | null) => void;
 }
 
 const ZOOM_STEPS = [20, 40, 80, 140, 240, 400];
@@ -72,6 +82,7 @@ export class TimelineView {
   private readonly lanes: HTMLElement;
   private readonly empty: HTMLElement;
   private readonly playheadEl: HTMLElement;
+  private readonly dropLine: HTMLElement;
   private readonly mediaHost: HTMLElement;
 
   private doc: TimelineDoc | null = null;
@@ -80,6 +91,7 @@ export class TimelineView {
   private selectedClipId: string | null = null;
   private snap = true;
   private drag: DragState | null = null;
+  private dropLane: HTMLElement | null = null;
   private playing = false;
   private frame = 0;
   private lastTick = 0;
@@ -102,11 +114,17 @@ export class TimelineView {
       el('span', { text: 'Add media to the timeline to start arranging.' }),
     ]);
     this.playheadEl = el('div', { class: 'timeline-playhead' });
+    this.dropLine = el('div', { class: 'timeline-drop-line hidden' });
     this.mediaHost = el('div', { class: 'timeline-media', attrs: { 'aria-hidden': 'true' } });
 
-    const scroller = el('div', { class: 'timeline-scroll' }, [
-      el('div', { class: 'timeline-grid' }, [this.ruler, this.lanes, this.playheadEl, this.empty]),
+    const grid = el('div', { class: 'timeline-grid' }, [
+      this.ruler,
+      this.lanes,
+      this.playheadEl,
+      this.dropLine,
+      this.empty,
     ]);
+    const scroller = el('div', { class: 'timeline-scroll' }, [grid]);
 
     const toolbar = el('div', { class: 'timeline-toolbar' }, [
       this.playButton,
@@ -131,6 +149,9 @@ export class TimelineView {
     this.lanes.addEventListener('pointerdown', (event) => this.handleLanePointerDown(event));
     this.lanes.addEventListener('contextmenu', (event) => this.handleContextMenu(event));
     this.ruler.addEventListener('contextmenu', (event) => this.handleContextMenu(event));
+    this.host.addEventListener('dragover', (event) => this.handleDragOver(event));
+    this.host.addEventListener('dragleave', (event) => this.handleDragLeave(event));
+    this.host.addEventListener('drop', (event) => this.handleDrop(event));
     this.host.addEventListener('pointerdown', () => this.host.focus({ preventScroll: true }));
     this.render();
   }
@@ -144,12 +165,27 @@ export class TimelineView {
     return this.playheadMs;
   }
 
+  /** Moves the playhead from another surface (e.g. the preview monitor). */
+  seekTo(ms: number): void {
+    if (Math.abs(this.playheadMs - ms) < 1) return;
+    this.setPlayhead(ms);
+  }
+
+  /** Stops timeline playback without touching the playhead. */
+  pausePlayback(): void {
+    this.pause();
+  }
+
   /** Rebuilds the lanes, ruler and toolbar from the store document. */
   render(): void {
     if (this.disposed) return;
     if (this.doc !== null) {
       // The store hands over a new document on every edit.
       this.doc = this.options.store.current ?? this.doc;
+    }
+    if (this.selectedClipId && this.doc && !findClip(this.doc, this.selectedClipId)) {
+      this.selectedClipId = null;
+      this.options.onSelectedClipChange?.(null);
     }
     this.renderToolbar();
     this.renderRuler();
@@ -401,6 +437,67 @@ export class TimelineView {
     this.render();
   }
 
+  // ------------------------------------------------------------
+  // Drag and drop from the explorer or the operating system
+  // ------------------------------------------------------------
+  private acceptsDrag(event: DragEvent): boolean {
+    const types = [...(event.dataTransfer?.types ?? [])];
+    return types.includes('application/x-flaxia-file') || types.includes('Files');
+  }
+
+  private handleDragOver(event: DragEvent): void {
+    if (!this.acceptsDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    const ms = this.dropTime(event.clientX);
+    this.dropLine.classList.remove('hidden');
+    this.dropLine.style.left = `${LABEL_WIDTH + this.msToPx(ms)}px`;
+    const lane = (event.target as HTMLElement | null)?.closest<HTMLElement>('.timeline-lane') ?? null;
+    if (this.dropLane !== lane) {
+      this.dropLane?.classList.remove('is-drop-target');
+      this.dropLane = lane;
+      lane?.classList.add('is-drop-target');
+    }
+  }
+
+  private handleDragLeave(event: DragEvent): void {
+    if (!this.acceptsDrag(event)) return;
+    const related = event.relatedTarget as Node | null;
+    if (related && this.host.contains(related)) return;
+    this.hideDropTarget();
+  }
+
+  private handleDrop(event: DragEvent): void {
+    if (!this.acceptsDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const ms = this.dropTime(event.clientX);
+    const candidates = this.doc ? snapCandidates(this.doc, undefined, [this.playheadMs]) : [];
+    const start = this.snap && candidates.length > 0 ? snapMs(ms, candidates) : ms;
+    const trackId = this.trackAt(event.clientY)?.id ?? null;
+    this.hideDropTarget();
+    const transfer = event.dataTransfer;
+    const path = transfer?.getData('application/x-flaxia-file') || transfer?.getData('text/plain') || '';
+    const files = [...(transfer?.files ?? [])];
+    if (path) {
+      this.options.onDropFile?.(path, start, trackId);
+      return;
+    }
+    if (files.length > 0) this.options.onDropFiles?.(files, start, trackId);
+  }
+
+  private dropTime(clientX: number): number {
+    const rect = this.lanes.getBoundingClientRect();
+    return Math.max(0, this.pxToMs(clientX - rect.left - LABEL_WIDTH));
+  }
+
+  private hideDropTarget(): void {
+    this.dropLine.classList.add('hidden');
+    this.dropLane?.classList.remove('is-drop-target');
+    this.dropLane = null;
+  }
+
   /** Right click: clip actions on a clip, track actions on empty lanes. */
   private handleContextMenu(event: MouseEvent): void {
     event.preventDefault();
@@ -410,7 +507,7 @@ export class TimelineView {
     const clipNode = target.closest<HTMLElement>('.timeline-clip');
     const clipId = clipNode?.dataset.clip ?? null;
     if (!clipId) {
-      this.showLaneMenu(event.clientX, event.clientY);
+      this.showLaneMenu(event.clientX, event.clientY, this.dropTime(event.clientX));
       return;
     }
     this.select(clipId);
@@ -439,6 +536,11 @@ export class TimelineView {
         run: () => this.duplicateClip(clipId),
       },
       {
+        label: 'Add File…',
+        icon: 'plus',
+        run: () => this.options.onAddFile?.(clipEnd(clip), track.id),
+      },
+      {
         label: 'Open source',
         icon: 'external',
         run: () => this.options.onOpenSource(clip.path),
@@ -457,8 +559,14 @@ export class TimelineView {
     ]);
   }
 
-  private showLaneMenu(x: number, y: number): void {
+  private showLaneMenu(x: number, y: number, addAtMs: number): void {
+    const trackId = this.trackAt(y)?.id ?? null;
     showContextMenu(x, y, [
+      {
+        label: 'Add File…',
+        icon: 'plus',
+        run: () => this.options.onAddFile?.(addAtMs, trackId),
+      },
       { label: 'Add video track', icon: 'file-video', run: () => this.addTrack('video') },
       { label: 'Add audio track', icon: 'file-audio', run: () => this.addTrack('audio') },
       {
@@ -571,6 +679,8 @@ export class TimelineView {
       node.classList.toggle('is-selected', node.dataset.clip === clipId);
     }
     this.renderToolbar();
+    const found = clipId && this.doc ? findClip(this.doc, clipId) : null;
+    this.options.onSelectedClipChange?.(found?.clip.path ?? null);
   }
 
   private toggleSnap(): void {
@@ -599,6 +709,7 @@ export class TimelineView {
     this.lastTick = performance.now();
     this.syncAudio();
     this.renderToolbar();
+    this.options.onPlaybackChange?.(true);
     this.frame = requestAnimationFrame(this.tick);
   }
 
@@ -612,6 +723,7 @@ export class TimelineView {
     }
     this.audio.clear();
     this.renderToolbar();
+    this.options.onPlaybackChange?.(false);
   }
 
   private tick = (now: number): void => {

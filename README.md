@@ -13,8 +13,13 @@ quiet-craft surface language of Flaxia: emerald accents, 1px hairlines,
 - Monaco editor with local workers (no CDN, no remote code)
 - IndexedDB workspace with tabs, quick open, search, rename/delete, ZIP import/export
 - Explorer sidebar with a draggable (and keyboard-operable) width
+- **Timeline-first bottom panel** (switch back to Terminal in Settings)
+- **Right-hand inspector** with paired sliders and numeric fields for picture
+  adjustments (brightness, contrast, saturation, rotate, flip)
 - **Media editor**: image/video/audio preview tabs, non-destructive adjustments,
   and a Premiere-style **timeline** in the bottom panel (trim, split, move, snap)
+- **Preview monitor**: composites the timeline on a canvas with a transport,
+  frame stepping, timecode and fullscreen
 - Light / dark / system themes with FOUC-free boot
 - **Test Play**: run the workspace `index.html` in a sandboxed preview **tab**,
   with a ~450 ms auto reload after every save
@@ -70,9 +75,11 @@ The workspace also edits media. Binary files are stored as Blobs in IndexedDB
 
 1. **Import media** from the explorer (or _Workspace: Import Media…_ in the
    command palette) to add images, video and audio.
-2. Opening one shows a preview tab with the picture/video, transport controls
-   and non-destructive adjustments (brightness, contrast, saturation, rotate,
-   flip). The adjustments live in the timeline document.
+2. Opening one shows a preview tab with the picture/video and transport controls.
+   The **right-hand inspector** owns the non-destructive adjustments
+   (brightness, contrast, saturation, rotate, flip): each row pairs a slider with
+   a numeric field, so a value can be dragged or typed. The adjustments live in
+   the timeline document.
 3. **Add to timeline** places the source on its track at the playhead. The
    **Timeline** tab in the bottom panel is a Premiere-style editor: click the
    ruler to scrub, drag clips to move, drag an edge to trim, `S` to split at the
@@ -85,6 +92,24 @@ The workspace also edits media. Binary files are stored as Blobs in IndexedDB
 
 Phase 1 is arrangement + preview. Encoding/export, a frame-accurate video
 monitor, waveforms, transitions and image cropping are follow-ups.
+
+## Preview monitor
+
+The **Preview** tab is the program monitor for the timeline. It is deliberately
+separate from Test Play:
+
+| Tab       | What it shows                                                 |
+| --------- | ------------------------------------------------------------- |
+| Test Play | The workspace web project (`index.html`) in a sandboxed frame |
+| Preview   | The timeline arrangement, composited on a canvas              |
+
+Preview draws the clip under the playhead with the same adjustments as the
+inspector, plays video/audio clips, and keeps the timeline playhead in sync.
+The transport supports play/pause, frame stepping, go-to-start, loop and
+fullscreen. It never loads media while the tab is hidden.
+
+Test Play remains the right tool for a web project; Preview is the right tool
+for reviewing a timeline edit.
 
 ## Test Play
 

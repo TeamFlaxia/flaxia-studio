@@ -36,7 +36,9 @@
 | `src/play/`                      | Test Play policy, URL rewriting, host/shell bridge               |
 | `src/lib/media.ts`               | Media classification, MIME map, duration/size probing            |
 | `src/lib/timeline.ts`            | Timeline document and pure editing operations (trim/split/move)  |
-| `src/ui/media-view.ts`           | Image/video/audio preview pane and adjustments                   |
+| `src/ui/inspector.ts`            | Right-hand adjustment inspector (slider + numeric field rows)    |
+| `src/ui/media-view.ts`           | Image/video/audio preview pane                                   |
+| `src/ui/preview-view.ts`         | Canvas program monitor, transport and timeline compositing       |
 | `src/ui/timeline-view.ts`        | Timeline panel: ruler, tracks, playhead, playback                |
 | `src/ui/timeline-store.ts`       | `.flaxia/timeline.json` persistence with debounced saves         |
 | `src/linux/manifest.ts`          | Manifest validation and chunk URL resolution                     |
@@ -142,6 +144,26 @@ preview can not do anything Arcade would not allow.
 The runtime frame has an opaque origin, so `src/play/runtime.js` creates the blob
 URLs inside the frame (Chromium refuses a blob URL made by another origin). The
 seed travels with the execute payload; writes travel back through the shell.
+
+## Preview monitor and inspector
+
+The timeline has its own program monitor, separate from Test Play:
+
+- `src/ui/preview-view.ts` composites the clip under the playhead onto a
+  `<canvas>` (`drawImage` plus `ctx.filter`/transform for the same brightness,
+  contrast, saturation, rotate and flip values the inspector writes).
+- The monitor owns a transport (play, frame step, start, loop, fullscreen) and
+  reports its position to `App`, which calls `TimelineView.seekTo()`. Scrubbing
+  the timeline moves the monitor the other way.
+- Media elements are only created while the monitor is active or playing, so a
+  hidden tab does not decode media.
+- `src/ui/inspector.ts` is the single control surface for adjustments. Each row
+  pairs a range input with a numeric input and writes through the existing
+  `setAdjustments()` path into `.flaxia/timeline.json`.
+
+Blob URLs for the monitor are created on the studio page (strict CSP, same
+origin); the opaque-origin restriction only applies to the sandboxed Test Play
+frame.
 
 ## Headers
 
