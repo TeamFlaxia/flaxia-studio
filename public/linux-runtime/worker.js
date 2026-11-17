@@ -981,6 +981,13 @@ function parseExit(error) {
 }
 
 async function sha256(bytes) {
+  if (!crypto.subtle) {
+    // The digest check is mandatory, so an insecure context is a hard stop
+    // rather than a skipped verification.
+    throw new Error(
+      'Image digest verification needs a secure context. Open the studio over HTTPS or on localhost.',
+    );
+  }
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }

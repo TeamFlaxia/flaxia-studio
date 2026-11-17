@@ -15,6 +15,7 @@ import {
   type PlayPayload,
 } from './policy.ts';
 import { isPlayShellMessage, type PlayHostMessage, type PlayShellMessage } from './protocol.ts';
+import { readPreviewStorage, writePreviewStorage } from './storage.ts';
 
 export type PlayStatus = 'idle' | 'loading' | 'running' | 'error';
 
@@ -38,7 +39,11 @@ export class PlayHost {
   private executing = false;
   private disposed = false;
 
-  constructor(private readonly onStatusChange: (status: PlayStatus, detail?: string) => void) {
+  constructor(
+    private readonly onStatusChange: (status: PlayStatus, detail?: string) => void,
+    /** Storage namespace — one preview save per workspace. */
+    private readonly storageNamespace: string,
+  ) {
     window.addEventListener('message', this.handleMessage);
   }
 
@@ -103,6 +108,7 @@ export class PlayHost {
         entry: payload.entry,
         files: payload.files,
         totalBytes: payload.totalBytes,
+        storage: readPreviewStorage(this.storageNamespace),
       });
       this.setStatus('running');
 
@@ -192,6 +198,9 @@ export class PlayHost {
     if (!isPlayShellMessage(event.data)) return;
     const message = event.data;
     if (message.type === 'play:ready') this.shellReady = true;
+    if (message.type === 'play:storage-write') {
+      writePreviewStorage(this.storageNamespace, message.operation, message.key, message.value);
+    }
     for (const waiter of [...this.waiters]) {
       if (!waiter.match(message)) continue;
       const index = this.waiters.indexOf(waiter);

@@ -49,7 +49,7 @@ if (await page.locator('.dialog .input').count()) {
 console.log('renamed folder:', (await page.locator('.tree-row').allInnerTexts()).includes('renamed-demo'));
 
 // Import ZIP
-await page.locator('input[type=file]').setInputFiles(zipPath);
+await page.locator('input[data-import="zip"]').setInputFiles(zipPath);
 await page.waitForTimeout(800);
 const treeAfterImport = await page.locator('.tree-row').allInnerTexts();
 console.log('imported:', treeAfterImport.includes('imported'), treeAfterImport.includes('notes.md'));
@@ -96,7 +96,7 @@ await page.keyboard.press('Enter');
 await page.waitForTimeout(500);
 const content = await page.evaluate(async () => {
   const db = await new Promise((resolve, reject) => {
-    const req = indexedDB.open('flaxia-studio', 1);
+    const req = indexedDB.open('flaxia-studio');
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });

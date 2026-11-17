@@ -33,21 +33,38 @@ const csp = [
   "form-action 'self'",
   "frame-ancestors 'none'",
 ].join('; ');
-// SYNC: relaxed CSP for the Test Play shell — keep identical to
-// public/_headers (`/play/*`) and vite.config.ts (PLAY_CSP).
-const gameCsp = [
-  "default-src 'self' * data: blob:",
-  "script-src 'self' * data: blob: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
-  "worker-src 'self' * data: blob:",
-  "style-src 'self' * data: blob: 'unsafe-inline'",
-  "img-src 'self' * data: blob:",
-  "font-src 'self' * data: blob:",
-  "media-src 'self' * data: blob:",
-  "connect-src 'self' * data: blob:",
-  "frame-src 'self' * data: blob:",
-  "child-src 'self' * data: blob:",
+// SYNC: relaxed CSP for the Test Play documents — keep identical to
+// public/_headers (`/play/*`) and vite.config.ts. The trusted shell keeps a
+// minimal policy, the game document gets the game-facing policy with the
+// `sandbox` directive that forces an opaque origin.
+const playShellCsp = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "worker-src 'self' blob:",
+  "img-src 'self' data: blob:",
+  "font-src 'self'",
+  "connect-src 'self' data: blob:",
+  "frame-src 'self'",
   "object-src 'none'",
-  'base-uri *',
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'self'",
+].join('; ');
+
+const playRuntimeCsp = [
+  'sandbox allow-scripts allow-pointer-lock allow-forms allow-popups',
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https:",
+  "style-src 'self' 'unsafe-inline' data: blob: https:",
+  "worker-src 'self' blob:",
+  "img-src 'self' data: blob: https:",
+  "media-src 'self' data: blob: https:",
+  "font-src 'self' data: blob: https:",
+  "connect-src 'self' data: blob: https: wss:",
+  "frame-src 'self' blob: data: https:",
+  "object-src 'none'",
+  "base-uri 'none'",
   'form-action *',
   "frame-ancestors 'self'",
 ].join('; ');
@@ -72,7 +89,10 @@ createServer((req, res) => {
     res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Content-Security-Policy', gameCsp);
+    res.setHeader(
+      'Content-Security-Policy',
+      urlPath === '/play/runtime.html' ? playRuntimeCsp : playShellCsp,
+    );
   } else {
     res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
     res.setHeader('Content-Security-Policy', csp);

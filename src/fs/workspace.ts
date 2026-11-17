@@ -1,26 +1,43 @@
-import { base64ToBytes, bytesToBase64 } from './base64.ts';
+import { randomId } from '../lib/id.ts';
+import { base64ByteLength, base64ToBytes } from './base64.ts';
 import {
+  deleteBlobs,
   deleteFiles,
   type FileRecord,
+  getBlob,
   getWorkspace,
   listFiles,
   listWorkspaces,
+  putBlob,
   putFiles,
   putWorkspace,
   type WorkspaceRecord,
 } from './indexeddb.ts';
 import { isPathInside, joinPath, normalizePath, stem, uniquePath } from './path.ts';
-import { exportZip, importZip, type ZipImportResult } from './zip.ts';
+import { exportZip, importZip, type ZipFile, type ZipImportResult } from './zip.ts';
 
 export interface WorkspaceEntry {
   path: string;
   type: 'file' | 'dir';
   content: string;
   binary?: boolean;
+  /** Blob payload id for binaries stored outside the record (large media). */
+  blobId?: string;
+  /** Byte length of a binary file. */
+  size?: number;
+  mime?: string;
   updatedAt: number;
 }
 
 const DEFAULT_WORKSPACE_NAME = 'flaxia-studio';
+
+/** Hard cap for one binary file (2 GiB) — video clips are big, not unlimited. */
+export const MAX_BINARY_BYTES = 2 * 1024 * 1024 * 1024;
+
+/** A `BlobPart` copy: `Uint8Array` views may share a larger buffer. */
+function toBlobPart(bytes: Uint8Array): ArrayBuffer {
+  return bytes.slice().buffer as ArrayBuffer;
+}
 
 export class Workspace {
   readonly id: string;
@@ -61,6 +78,9 @@ export class Workspace {
         type: record.type,
         content: record.content,
         binary: record.binary === true,
+        blobId: record.blobId,
+        size: record.size,
+        mime: record.mime,
         updatedAt: record.updatedAt,
       });
     }
@@ -94,6 +114,9 @@ export class Workspace {
       type: entry.type,
       content: entry.content,
       binary: entry.binary === true,
+      blobId: entry.blobId,
+      size: entry.size,
+      mime: entry.mime,
       updatedAt: entry.updatedAt,
     };
   }
@@ -144,22 +167,50 @@ export class Workspace {
     return this.entries.get(path)?.binary === true;
   }
 
-  readBinary(path: string): Uint8Array | null {
+  /** Byte length of a file, without materialising a blob. */
+  sizeOf(path: string): number {
     const entry = this.entries.get(path);
-    if (entry?.type !== 'file' || !entry.binary) return null;
-    return base64ToBytes(entry.content);
+    if (entry?.type !== 'file') return 0;
+    if (entry.size !== undefined) return entry.size;
+    return entry.binary ? base64ByteLength(entry.content) : entry.content.length;
   }
 
-  readBytes(path: string): Uint8Array | null {
+  mimeOf(path: string): string | undefined {
+    return this.entries.get(path)?.mime;
+  }
+
+  /** The binary payload of a file, whether it is a blob or a legacy record. */
+  async readBlob(path: string): Promise<Blob | null> {
+    const entry = this.entries.get(path);
+    if (entry?.type !== 'file' || !entry.binary) return null;
+    if (entry.blobId) {
+      const record = await getBlob(entry.blobId);
+      if (record) return record.blob;
+    }
+    // Legacy base64 record (written before the blob store existed).
+    return new Blob([toBlobPart(base64ToBytes(entry.content))], { type: entry.mime ?? '' });
+  }
+
+  async readBinary(path: string): Promise<Uint8Array | null> {
+    const entry = this.entries.get(path);
+    if (entry?.type !== 'file' || !entry.binary) return null;
+    const blob = await this.readBlob(path);
+    return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+  }
+
+  async readBytes(path: string): Promise<Uint8Array | null> {
     const entry = this.entries.get(path);
     if (entry?.type !== 'file') return null;
-    return entry.binary ? base64ToBytes(entry.content) : new TextEncoder().encode(entry.content);
+    if (!entry.binary) return new TextEncoder().encode(entry.content);
+    const blob = await this.readBlob(path);
+    return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
   }
 
   async writeFile(path: string, content: string): Promise<void> {
     const normalized = normalizePath(path);
     if (!normalized) throw new Error('Cannot write to the workspace root.');
     await this.ensureParents(normalized);
+    const previous = this.entries.get(normalized)?.blobId;
     const entry: WorkspaceEntry = {
       path: normalized,
       type: 'file',
@@ -169,21 +220,44 @@ export class Workspace {
     };
     this.entries.set(normalized, entry);
     await this.persist(entry);
+    if (previous) await deleteBlobs([previous]);
   }
 
-  async writeBinaryFile(path: string, bytes: Uint8Array): Promise<void> {
+  /**
+   * Stores a binary file as a Blob, so video and audio are never base64.
+   *
+   * Returns the normalized path so callers can open the file right away.
+   */
+  async writeBinaryFile(path: string, data: Uint8Array | Blob, mime?: string): Promise<string> {
     const normalized = normalizePath(path);
     if (!normalized) throw new Error('Cannot write to the workspace root.');
+    const blob = data instanceof Blob ? data : new Blob([toBlobPart(data)], { type: mime ?? '' });
+    if (blob.size > MAX_BINARY_BYTES) {
+      throw new Error(`${normalized} is larger than the 2 GB file limit.`);
+    }
     await this.ensureParents(normalized);
+    const previous = this.entries.get(normalized)?.blobId;
+    const blobId = randomId();
+    await putBlob({ id: blobId, blob, size: blob.size });
     const entry: WorkspaceEntry = {
       path: normalized,
       type: 'file',
-      content: bytesToBase64(bytes),
+      content: '',
       binary: true,
+      blobId,
+      size: blob.size,
+      mime: mime ?? (blob.type || undefined),
       updatedAt: Date.now(),
     };
     this.entries.set(normalized, entry);
-    await this.persist(entry);
+    try {
+      await this.persist(entry);
+    } catch (error) {
+      await deleteBlobs([blobId]);
+      throw error;
+    }
+    if (previous) await deleteBlobs([previous]);
+    return normalized;
   }
 
   async createFile(path: string, content = ''): Promise<string> {
@@ -212,11 +286,17 @@ export class Workspace {
     const normalized = normalizePath(path);
     if (!normalized) throw new Error('Cannot remove the workspace root.');
     const removed: string[] = [];
+    const blobIds: string[] = [];
     for (const key of this.entries.keys()) {
       if (isPathInside(key, normalized)) removed.push(key);
     }
-    for (const key of removed) this.entries.delete(key);
+    for (const key of removed) {
+      const blobId = this.entries.get(key)?.blobId;
+      if (blobId) blobIds.push(blobId);
+      this.entries.delete(key);
+    }
     await deleteFiles(removed.map((key) => recordId(this.id, key)));
+    await deleteBlobs(blobIds);
     await this.touch();
   }
 
@@ -260,12 +340,31 @@ export class Workspace {
       const normalized = uniquePath(existing, file.path);
       existing.add(normalized);
       await this.ensureParents(normalized);
+      const now = Date.now();
+      if (file.type === 'text') {
+        const entry: WorkspaceEntry = {
+          path: normalized,
+          type: 'file',
+          content: file.text,
+          binary: false,
+          updatedAt: now,
+        };
+        this.entries.set(normalized, entry);
+        records.push(entry);
+        continue;
+      }
+      // Binaries go straight to the blob store instead of base64.
+      const blob = new Blob([toBlobPart(file.bytes)]);
+      const blobId = randomId();
+      await putBlob({ id: blobId, blob, size: blob.size });
       const entry: WorkspaceEntry = {
         path: normalized,
         type: 'file',
-        content: file.content,
-        binary: file.binary === true,
-        updatedAt: Date.now(),
+        content: '',
+        binary: true,
+        blobId,
+        size: blob.size,
+        updatedAt: now,
       };
       this.entries.set(normalized, entry);
       records.push(entry);
@@ -275,12 +374,19 @@ export class Workspace {
     return { imported: result.files.length, skipped: result.skipped };
   }
 
-  exportZip(): Uint8Array {
-    return exportZip(
-      this.list()
-        .filter((entry) => entry.type === 'file')
-        .map((entry) => ({ path: entry.path, content: entry.content, binary: entry.binary })),
-    );
+  async exportZip(): Promise<Uint8Array> {
+    const files: ZipFile[] = [];
+    for (const entry of this.list()) {
+      if (entry.type !== 'file') continue;
+      if (!entry.binary) {
+        files.push({ path: entry.path, type: 'text', text: entry.content });
+        continue;
+      }
+      const blob = await this.readBlob(entry.path);
+      if (!blob) continue;
+      files.push({ path: entry.path, type: 'binary', bytes: new Uint8Array(await blob.arrayBuffer()) });
+    }
+    return exportZip(files);
   }
 
   async importZipBytes(data: Uint8Array): Promise<{ imported: number; skipped: string[] }> {
@@ -326,7 +432,7 @@ function compareEntries(a: WorkspaceEntry, b: WorkspaceEntry): number {
 async function createRecord(): Promise<WorkspaceRecord> {
   const now = Date.now();
   const record: WorkspaceRecord = {
-    id: crypto.randomUUID(),
+    id: randomId(),
     name: DEFAULT_WORKSPACE_NAME,
     createdAt: now,
     updatedAt: now,

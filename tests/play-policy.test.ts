@@ -60,6 +60,22 @@ test('validatePlayFiles rejects unsafe or unsupported paths', () => {
   assert.throws(() => validatePlayFiles([file('notes.md')]), /not allowed/);
   assert.throws(() => validatePlayFiles([file('bundle.zip')]), /Nested ZIP/);
   assert.throws(() => validatePlayFiles([file('index.htm'.padEnd(300, 'x'))]), /Path too long/);
+  assert.throws(() => validatePlayFiles([file('.hidden/index.html')]), /Dotfiles/);
+  assert.throws(() => validatePlayFiles([file('bad?name.html')]), /Invalid path segment/);
+  assert.throws(() => validatePlayFiles([file('bad\u0001name.html')]), /Invalid path segment/);
+});
+
+test('validatePlayFiles rejects duplicate paths', () => {
+  assert.throws(() => validatePlayFiles([file('index.html'), file('index.html')]), /Duplicate path/);
+});
+
+test('dotfiles and unsafe names never enter the payload', () => {
+  assert.equal(isPlayPayloadPath('index.html'), true);
+  assert.equal(isPlayPayloadPath('src/main.js'), true);
+  assert.equal(isPlayPayloadPath('.github/workflows/ci.yml'), false);
+  assert.equal(isPlayPayloadPath('assets/.hidden.png'), false);
+  assert.equal(isPlayPayloadPath('weird<name>.html'), false);
+  assert.equal(isPlayPayloadPath('bundle.zip'), false);
 });
 
 test('validatePlayFiles enforces count and transfer limits', () => {

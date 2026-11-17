@@ -12,9 +12,12 @@ quiet-craft surface language of Flaxia: emerald accents, 1px hairlines,
 
 - Monaco editor with local workers (no CDN, no remote code)
 - IndexedDB workspace with tabs, quick open, search, rename/delete, ZIP import/export
+- Explorer sidebar with a draggable (and keyboard-operable) width
+- **Media editor**: image/video/audio preview tabs, non-destructive adjustments,
+  and a Premiere-style **timeline** in the bottom panel (trim, split, move, snap)
 - Light / dark / system themes with FOUC-free boot
-- **Test Play**: run the workspace `index.html` in a sandboxed preview pane next
-  to the editor, with a ~450 ms auto reload after every save
+- **Test Play**: run the workspace `index.html` in a sandboxed preview **tab**,
+  with a ~450 ms auto reload after every save
 - container2wasm Debian Linux in a Web Worker (a sub-feature, not the focus)
 - A terminal that routes commands to Linux once it is booted
 - A **persistent Linux session**: boot once, then commands run in the same guest
@@ -54,15 +57,66 @@ Test Play previews the workspace in the browser — no container, no build step.
 1. Press <kbd>Ctrl/Cmd</kbd> + <kbd>Shift</kbd> + <kbd>Enter</kbd>, click the
    **Test Play** pill, or run `play` in the terminal.
 2. The shell picks the shallowest `index.html` in the workspace and runs it in a
-   sandboxed frame next to the editor.
+   sandboxed frame. The preview is a tab in the editor area: edit, then switch
+   to the **Test Play** tab to look at it.
 3. Every save re-runs the preview ~450 ms later (toggle with **Settings → Test
-   Play → Auto reload**).
+   Play → Auto reload**). Auto reload keeps the current tab, so saving never
+   pulls you away from the editor.
 
-The preview follows the Flaxia Arcade execution policy: an allowlist of web
-assets (no `.svg`, no nested ZIP), 1024 files, 25 MB per run, path traversal and
-absolute paths rejected, and `allow-same-origin` is never granted. The strict
-production CSP stays on the studio page; only the same-origin shell under
-`/play/*` gets the relaxed policy that games need.
+## Media editor
+
+The workspace also edits media. Binary files are stored as Blobs in IndexedDB
+(no base64, up to 2 GB per file), so video does not inflate.
+
+1. **Import media** from the explorer (or _Workspace: Import Media…_ in the
+   command palette) to add images, video and audio.
+2. Opening one shows a preview tab with the picture/video, transport controls
+   and non-destructive adjustments (brightness, contrast, saturation, rotate,
+   flip). The adjustments live in the timeline document.
+3. **Add to timeline** places the source on its track at the playhead. The
+   **Timeline** tab in the bottom panel is a Premiere-style editor: click the
+   ruler to scrub, drag clips to move, drag an edge to trim, `S` to split at the
+   playhead, `Delete` to remove. **Right-click** a clip for split/duplicate/open
+   source/delete/track actions, or empty space for track, snapping and zoom
+   commands. `Space` plays; audio clips play in sync and the playhead follows the
+   frame clock.
+4. The timeline is saved in `.flaxia/timeline.json`, so it survives reloads and
+   is included in Export ZIP. Test Play and the Linux guest never see it.
+
+Phase 1 is arrangement + preview. Encoding/export, a frame-accurate video
+monitor, waveforms, transitions and image cropping are follow-ups.
+
+## Test Play
+
+Test Play previews the workspace in the browser — no container, no build step.
+
+1. Press <kbd>Ctrl/Cmd</kbd> + <kbd>Shift</kbd> + <kbd>Enter</kbd>, click the
+   **Test Play** pill, or run `play` in the terminal.
+2. The shell picks the shallowest `index.html` in the workspace and runs it in a
+   sandboxed frame. The preview is a tab in the editor area: edit, then switch
+   to the **Test Play** tab to look at it.
+3. Every save re-runs the preview ~450 ms later (toggle with **Settings → Test
+   Play → Auto reload**). Auto reload keeps the current tab, so saving never
+   pulls you away from the editor.
+
+The preview follows the Flaxia Arcade execution policy (`src/play/policy.ts`
+mirrors `flaxia/src/lib/file-extensions.ts`, `flaxia/src/lib/zip-constants.ts`
+and `flaxia/sandbox/zip-preview.js`):
+
+- Allowlist of web assets (no `.svg`, no nested ZIP), 1024 files, 100 MB
+  extracted, 25 MB per run, path length 255, depth 10.
+- Path rules from the Arcade validators: no traversal, no absolute paths, no
+  dotfiles, no control characters, no duplicate entries.
+- `allow-same-origin` is never granted, so the game frame keeps an opaque
+  origin: `localStorage` and `document.cookie` throw there. The runtime bridges
+  them — `localStorage` is seeded from a workspace-scoped save and every write
+  is relayed back to the studio (`flaxia:studio:<workspace>`), and
+  `document.cookie` degrades to an empty string instead of throwing.
+- `<base>` and `<meta http-equiv>` elements are stripped from the game
+  document, and archive assets answer only `GET`/`HEAD`.
+- The strict production CSP stays on the studio page. The trusted shell keeps a
+  minimal policy and the game document runs under the Arcade sandbox policy
+  (including the `sandbox` directive that forces the opaque origin).
 
 ## Performance
 
@@ -125,8 +179,9 @@ R2 / static assets
 - The workspace is a preopened directory at `/workspace` (virtio-9p in the
   guest). Commands run in a writable `/tmp/flaxia-work` copy so compiled
   binaries can execute, then the result is mirrored back.
-- UTF-8 text files and binary artifacts (≤ 20 MiB each) are mirrored. Binaries
-  are stored base64-encoded in IndexedDB, shown with a binary icon, and can be
+- UTF-8 text files and binary artifacts (≤ 20 MiB each) are mirrored. Workspace
+  binaries are stored as Blobs (so media is not base64); files above 20 MiB are
+  not mirrored into the Linux guest. They are shown with a type icon and can be
   downloaded or exported in the ZIP. Empty directories are not preserved by
   command-mode sync.
 - The browser Fetch proxy (`c2w-net-proxy`) is available for commands that need

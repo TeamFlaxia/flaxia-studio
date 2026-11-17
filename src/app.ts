@@ -1,24 +1,54 @@
 import { EditorManager, installMonacoShadowStyles } from './editor/monaco';
-import { base64ByteLength, base64ToBytes } from './fs/base64';
-import { basename, dirname, isPathInside, joinPath, languageForPath } from './fs/path';
+import { base64ToBytes } from './fs/base64';
+import {
+  basename,
+  dirname,
+  isPathInside,
+  joinPath,
+  languageForPath,
+  normalizePath,
+  uniquePath,
+} from './fs/path';
 import type { WorkspaceEntry } from './fs/workspace';
 import { Workspace } from './fs/workspace';
+import { tryDecodeText } from './fs/zip';
+import { copyText } from './lib/clipboard';
 import { el, formatBytes, iconButton } from './lib/dom';
 import { fileIcon, type IconName, icon } from './lib/icons';
+import {
+  applyLayoutSizes,
+  clampSidebarWidth,
+  type LayoutSizes,
+  loadLayoutSizes,
+  saveLayoutSizes,
+} from './lib/layout';
+import {
+  DEFAULT_IMAGE_DURATION_MS,
+  isMediaPath,
+  mediaKind,
+  mimeForMedia,
+  probeMedia,
+  trackKindFor,
+} from './lib/media';
+import { bindDragHandle, bindSeparatorKeys } from './lib/resize';
 import { loadSettings, type Settings, saveSettings } from './lib/settings';
 import { matchesShortcut, modShortcut } from './lib/shortcut';
 import { cycleTheme, getTheme, initTheme, setTheme, themeLabel } from './lib/theme';
+import { addClip, addTrack, type MediaAsset, MIN_CLIP_MS, setAdjustments, trackEnd } from './lib/timeline';
 import { LinuxRuntime, type LinuxStatus } from './linux/runtime';
 import { PlayHost, type PlayStatus, PlayStopped } from './play/host';
 import { isPlayPayloadPath, type PlayFile, type PlayPayload, validatePlayFiles } from './play/policy';
 import { StudioShell } from './terminal/shell';
 import { showContextMenu } from './ui/context-menu';
 import { confirmDialog, openDialog, promptDialog } from './ui/dialog';
+import { MediaView } from './ui/media-view';
 import { isPaletteOpen, openPalette, type PaletteItem } from './ui/palette';
+import { TimelineStore } from './ui/timeline-store';
+import { TimelineView } from './ui/timeline-view';
 import { toast } from './ui/toast';
 
 type SidebarView = 'explorer' | 'search' | 'linux';
-type PanelView = 'terminal' | 'output' | 'problems';
+type PanelView = 'terminal' | 'output' | 'problems' | 'timeline';
 
 interface SearchResult {
   path: string;
@@ -46,6 +76,7 @@ export class App implements ShellHostish {
   private sidebarTitle!: HTMLElement;
   private sidebarActions!: HTMLElement;
   private sidebarBody!: HTMLElement;
+  private sidebarResizer!: HTMLElement;
   private editorArea!: HTMLElement;
   private tabsBar!: HTMLElement;
   private breadcrumbs!: HTMLElement;
@@ -57,16 +88,27 @@ export class App implements ShellHostish {
   private terminalView!: HTMLElement;
   private outputView!: HTMLElement;
   private problemsView!: HTMLElement;
+  private timelineView!: HTMLElement;
   private statusbar!: HTMLElement;
   private editorMain!: HTMLElement;
   private editorColumn!: HTMLElement;
+  private mediaPane!: HTMLElement;
+  private mediaView: MediaView;
+  private timelineStore: TimelineStore;
+  private timeline: TimelineView;
   private playPane!: HTMLElement;
+  private playHead!: HTMLElement;
+  private playStatus!: HTMLElement;
+  private playBody!: HTMLElement;
+  private playEmpty!: HTMLElement;
   private runPill!: HTMLButtonElement;
   private vmPill!: HTMLButtonElement;
   private vmDetail!: HTMLElement;
   private commandTrigger!: HTMLButtonElement;
   private themeButton!: HTMLButtonElement;
   private importInput!: HTMLInputElement;
+  private mediaInput!: HTMLInputElement;
+  private dropOverlay!: HTMLElement;
   private editor: EditorManager;
   private shell: StudioShell;
   private playHost: PlayHost;
@@ -87,9 +129,12 @@ export class App implements ShellHostish {
   private warnedApkCors = false;
   private lastLinuxStatus: LinuxStatus;
   private linuxUnsubscribe: (() => void) | null = null;
-  private playVisible = false;
+  private activeView: 'editor' | 'play' | 'media' = 'editor';
+  private timelinePlayheadMs = 0;
   private playHasRun = false;
+  private playStatusState: PlayStatus = 'idle';
   private playReloadTimer: number | undefined;
+  private layoutSizes: LayoutSizes = loadLayoutSizes();
 
   constructor(workspace: Workspace) {
     this.workspace = workspace;
@@ -98,7 +143,25 @@ export class App implements ShellHostish {
     this.editorHost = el('div', { class: 'editor-host', attrs: { 'aria-label': 'Editor' } });
     this.editor = new EditorManager(this.editorHost);
     this.shell = new StudioShell(this);
-    this.playHost = new PlayHost((status, detail) => this.handlePlayStatus(status, detail));
+    this.playHost = new PlayHost(
+      (status, detail) => this.handlePlayStatus(status, detail),
+      this.workspace.id,
+    );
+    this.timelineStore = new TimelineStore(this.workspace, () => this.handleTimelineChange());
+    this.mediaView = new MediaView({
+      onAddToTimeline: (path) => void this.addMediaToTimeline(path),
+      onAdjustmentsChange: (path, adjustments) => {
+        this.timelineStore.updateWith((doc) => setAdjustments(doc, path, adjustments));
+      },
+    });
+    this.timeline = new TimelineView({
+      store: this.timelineStore,
+      workspace: this.workspace,
+      onPlayheadChange: (ms) => {
+        this.timelinePlayheadMs = ms;
+      },
+      onOpenSource: (path) => this.openFile(path),
+    });
     this.linux.setManifestUrl(this.settings.linuxManifestUrl);
     this.linux.setNetworkEnabled(this.settings.linuxNetwork);
   }
@@ -111,6 +174,7 @@ export class App implements ShellHostish {
   mount(root: HTMLElement): void {
     initTheme();
     setTheme(this.settings.theme);
+    applyLayoutSizes(this.layoutSizes);
     this.root = root;
     this.buildShell();
     installMonacoShadowStyles();
@@ -129,7 +193,8 @@ export class App implements ShellHostish {
       minimap: this.settings.minimap,
     });
     this.editor.setTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
-    this.playHost.mount(this.playPane);
+    this.playHost.mount(this.playBody);
+    void this.timeline.init();
     this.shell.mount();
     this.shell.setTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
     this.linuxUnsubscribe = this.linux.subscribe((status) => this.handleLinuxStatus(status));
@@ -142,6 +207,8 @@ export class App implements ShellHostish {
     });
     window.addEventListener('resize', () => this.layout());
     window.addEventListener('pagehide', () => {
+      this.timeline.dispose();
+      void this.timelineStore.flush();
       if (this.playReloadTimer !== undefined) window.clearTimeout(this.playReloadTimer);
       this.playHost.dispose();
       this.linuxUnsubscribe?.();
@@ -168,16 +235,53 @@ export class App implements ShellHostish {
       el('div', { class: 'sidebar-header' }, [this.sidebarTitle, this.sidebarActions]),
       this.sidebarBody,
     );
+    this.sidebarResizer = el('div', {
+      class: 'sidebar-resizer',
+      attrs: {
+        role: 'separator',
+        'aria-orientation': 'vertical',
+        'aria-label': 'Resize explorer',
+        tabindex: '0',
+      },
+    });
 
     this.tabsBar = el('div', { class: 'tabs', role: 'tablist', attrs: { 'aria-label': 'Open editors' } });
     this.breadcrumbs = el('div', { class: 'breadcrumbs' });
     this.welcome = el('div', { class: 'welcome' });
     this.editorColumn = el('div', { class: 'editor-column' }, [this.editorHost, this.welcome]);
     this.playPane = el('div', { class: 'play-pane hidden', attrs: { 'aria-label': 'Test Play preview' } });
-    this.editorMain = el('div', { class: 'editor-main' }, [this.editorColumn, this.playPane]);
+    this.playHead = el('div', { class: 'play-head' });
+    this.playStatus = el('span', { class: 'play-status', dataset: { state: 'idle' }, text: 'Idle' });
+    this.playBody = el('div', { class: 'play-body' });
+    this.playEmpty = el('div', { class: 'play-empty' }, [
+      el('span', { class: 'play-empty-icon' }, [icon('play', 18)]),
+      el('span', { class: 'play-empty-title', text: 'No preview yet' }),
+      el('span', {
+        class: 'play-empty-hint',
+        text: 'Run Test Play to preview the workspace in a sandboxed frame.',
+      }),
+      el(
+        'button',
+        {
+          class: 'btn btn-primary',
+          type: 'button',
+          on: { click: () => this.runTestPlay() },
+        },
+        [icon('play', 14), 'Run Test Play'],
+      ),
+    ]);
+    this.playBody.appendChild(this.playEmpty);
+    this.playPane.append(this.playHead, this.playBody);
+    this.mediaPane = el('div', { class: 'media-pane hidden' }, [this.mediaView.host]);
+    this.editorMain = el('div', { class: 'editor-main' }, [this.editorColumn, this.mediaPane, this.playPane]);
     this.editorArea = el('main', { class: 'editor-area' }, [this.tabsBar, this.breadcrumbs, this.editorMain]);
 
-    const body = el('div', { class: 'studio-body' }, [this.rail, this.sidebar, this.editorArea]);
+    const body = el('div', { class: 'studio-body' }, [
+      this.rail,
+      this.sidebar,
+      this.sidebarResizer,
+      this.editorArea,
+    ]);
 
     this.panel = el('section', { class: 'panel', attrs: { 'aria-label': 'Panel' } });
     this.panelHead = el('div', { class: 'panel-head' });
@@ -192,24 +296,59 @@ export class App implements ShellHostish {
         'No problems have been detected in the workspace.',
       ]),
     ]);
-    this.panelBody.append(this.terminalView, this.outputView, this.problemsView);
+    this.timelineView = el('div', { class: 'panel-view timeline-view', dataset: { view: 'timeline' } }, [
+      this.timeline.host,
+    ]);
+    this.panelBody.append(this.terminalView, this.outputView, this.problemsView, this.timelineView);
     const resizer = el('div', { class: 'panel-resizer', attrs: { 'aria-hidden': 'true' } });
     this.panel.append(resizer, this.panelHead, this.panelBody);
 
     this.statusbar = el('footer', { class: 'statusbar', attrs: { 'aria-label': 'Status bar' } });
     this.importInput = el('input', {
       type: 'file',
+      dataset: { import: 'zip' },
       attrs: { accept: '.zip,application/zip', hidden: 'true' },
     });
     this.importInput.addEventListener('change', () => void this.handleImportFile());
+    this.mediaInput = el('input', {
+      type: 'file',
+      dataset: { import: 'media' },
+      attrs: {
+        accept: 'image/*,audio/*,video/*,font/*,.woff,.woff2,.ttf,.otf',
+        multiple: 'true',
+        hidden: 'true',
+      },
+    });
+    this.mediaInput.addEventListener('change', () => void this.handleMediaImport());
+    this.dropOverlay = el('div', { class: 'drop-overlay hidden', attrs: { 'aria-hidden': 'true' } }, [
+      el('div', { class: 'drop-target' }, [
+        el('span', { class: 'drop-icon' }, [icon('download', 22)]),
+        el('span', { class: 'drop-title', text: 'Drop to import' }),
+        el('span', {
+          class: 'drop-hint',
+          text: 'Media, images, audio, ZIP archives and text files land in the workspace root.',
+        }),
+      ]),
+    ]);
 
-    this.root.append(this.topbar, body, this.panel, this.statusbar, this.importInput);
+    this.root.append(
+      this.topbar,
+      body,
+      this.panel,
+      this.statusbar,
+      this.importInput,
+      this.mediaInput,
+      this.dropOverlay,
+    );
     this.buildTopbar();
     this.buildRail();
+    this.buildPlayHead();
     this.renderSidebarHeader();
     this.buildPanelHead();
     this.buildStatusbar();
     this.bindResizer(resizer);
+    this.bindSidebarResizer();
+    this.bindDropZone();
   }
 
   private buildTopbar(): void {
@@ -349,6 +488,19 @@ export class App implements ShellHostish {
     );
   }
 
+  private buildPlayHead(): void {
+    this.playHead.replaceChildren(
+      el('div', { class: 'play-title' }, [icon('play', 13), el('span', { text: 'Test Play' })]),
+      this.playStatus,
+      el('div', { class: 'play-head-spacer' }),
+      el('div', { class: 'play-actions' }, [
+        iconButton('rotate-cw', 'Reload preview', () => this.runTestPlay(), { size: 14 }),
+        iconButton('stop', 'Stop preview', () => this.stopTestPlay(), { size: 14 }),
+        iconButton('x', 'Back to editor', () => this.setActiveView('editor'), { size: 14 }),
+      ]),
+    );
+  }
+
   private selectSidebar(view: SidebarView): void {
     if (this.sidebarView === view && this.sidebarVisible) {
       this.sidebarVisible = false;
@@ -370,6 +522,7 @@ export class App implements ShellHostish {
     this.renderOutput();
     this.renderStatus();
     this.sidebar.classList.toggle('hidden', !this.sidebarVisible);
+    this.sidebarResizer.classList.toggle('hidden', !this.sidebarVisible);
     this.root.classList.toggle('is-panel-hidden', !this.panelVisible);
     this.renderLinuxCard();
   }
@@ -399,7 +552,8 @@ export class App implements ShellHostish {
         iconButton('file', 'New file', () => void this.newFile(), { size: 15 }),
         iconButton('folder-plus', 'New folder', () => void this.newFolder(), { size: 15 }),
         iconButton('download', 'Import ZIP', () => this.importInput.click(), { size: 15 }),
-        iconButton('upload', 'Export ZIP', () => this.exportWorkspace(), { size: 15 }),
+        iconButton('file-image', 'Import media', () => this.mediaInput.click(), { size: 15 }),
+        iconButton('upload', 'Export ZIP', () => void this.exportWorkspace(), { size: 15 }),
         iconButton('refresh', 'Refresh', () => this.renderSidebar(), { size: 15 }),
       );
     } else if (this.sidebarView === 'linux') {
@@ -499,7 +653,7 @@ export class App implements ShellHostish {
       items.push({
         label: 'Download',
         icon: 'download' as IconName,
-        run: () => this.downloadFile(node.path),
+        run: () => void this.downloadFile(node.path),
       });
     }
     items.push(
@@ -514,8 +668,10 @@ export class App implements ShellHostish {
         label: 'Copy Path',
         icon: 'copy' as IconName,
         run: () => {
-          void navigator.clipboard?.writeText(node.path);
-          toast('Copied path', node.path, 'info', 1600);
+          void copyText(node.path).then((copied) => {
+            if (copied) toast('Copied path', node.path, 'info', 1600);
+            else toast('Copy failed', 'Clipboard access needs a secure context.', 'warning');
+          });
         },
       },
     );
@@ -702,7 +858,16 @@ export class App implements ShellHostish {
                   icon: 'x',
                   run: () => void this.closeOthers(path),
                 },
-                { label: 'Copy Path', icon: 'copy', run: () => void navigator.clipboard?.writeText(path) },
+                {
+                  label: 'Copy Path',
+                  icon: 'copy',
+                  run: () => {
+                    void copyText(path).then((copied) => {
+                      if (!copied)
+                        toast('Copy failed', 'Clipboard access needs a secure context.', 'warning');
+                    });
+                  },
+                },
               ]);
             },
           },
@@ -731,14 +896,64 @@ export class App implements ShellHostish {
       );
       this.tabsBar.appendChild(tab);
     }
+    this.tabsBar.appendChild(this.buildPlayTab());
     this.tabsBar.appendChild(el('div', { class: 'tab-spacer' }));
     this.tabsBar.appendChild(
       iconButton('plus', 'New file', () => void this.newFile(), { size: 14, className: 'tab-new' }),
     );
   }
 
+  /** The Test Play preview lives in the tab bar next to the file tabs. */
+  private buildPlayTab(): HTMLElement {
+    const active = this.activeView === 'play';
+    const tab = el(
+      'div',
+      {
+        class: `tab tab-play ${active ? 'is-active' : ''}`.trim(),
+        role: 'tab',
+        attrs: {
+          'aria-selected': String(active),
+          tabindex: active ? '0' : '-1',
+          title: 'Test Play preview',
+        },
+        on: {
+          click: () => this.setActiveView('play'),
+          keydown: (event) => {
+            if (event.key === 'Enter' || event.key === ' ') this.setActiveView('play');
+          },
+        },
+      },
+      [
+        el('span', { class: 'tab-icon' }, [icon('play', 14)]),
+        el('span', { class: 'tab-label', text: 'Test Play' }),
+        el('span', { class: 'play-dot', dataset: { state: this.playStatusState } }),
+      ],
+    );
+    return tab;
+  }
+
+  /**
+   * The editor area shows one view at a time: the text editor, a media
+   * preview, or the Test Play preview. Media and Test Play are tabs.
+   */
+  private setActiveView(view: 'editor' | 'play' | 'media'): void {
+    const changed = this.activeView !== view;
+    this.activeView = view;
+    this.editorColumn.classList.toggle('hidden', view !== 'editor');
+    this.mediaPane.classList.toggle('hidden', view !== 'media');
+    this.playPane.classList.toggle('hidden', view !== 'play');
+    this.playEmpty.classList.toggle('hidden', this.playHasRun);
+    this.renderTabs();
+    this.renderBreadcrumbs();
+    if (changed) this.layout();
+  }
+
   private renderBreadcrumbs(): void {
     this.breadcrumbs.replaceChildren();
+    if (this.activeView === 'play') {
+      this.breadcrumbs.appendChild(el('span', { text: 'Test Play' }));
+      return;
+    }
     if (!this.activePath) {
       this.breadcrumbs.appendChild(el('span', { text: this.workspace.name }));
       return;
@@ -841,15 +1056,15 @@ export class App implements ShellHostish {
     this.activePath = null;
     this.editor.show(false);
     this.welcome.classList.remove('hidden');
-    this.renderTabs();
-    this.renderBreadcrumbs();
+    this.setActiveView('editor');
     this.renderWelcome();
     this.renderStatus();
   }
 
   openFile(path: string, line?: number): void {
     if (this.workspace.isBinary(path)) {
-      void this.openBinaryFile(path);
+      if (isMediaPath(path)) void this.openMediaFile(path);
+      else void this.openBinaryFile(path);
       return;
     }
     const content = this.workspace.readFile(path);
@@ -865,18 +1080,88 @@ export class App implements ShellHostish {
     this.editor.open(path, content, languageForPath(path));
     if (line) window.setTimeout(() => this.editor.revealLine(path, line), 30);
     if (window.matchMedia?.('(max-width: 720px)').matches) this.sidebarVisible = false;
-    this.renderTabs();
-    this.renderBreadcrumbs();
+    this.setActiveView('editor');
     this.renderExplorer();
     this.renderSidebar();
     this.renderStatus();
-    window.setTimeout(() => this.layout(), 0);
+  }
+
+  /** Opens an image/video/audio file in the media preview pane. */
+  private async openMediaFile(path: string): Promise<void> {
+    const blob = await this.workspace.readBlob(path);
+    if (!blob) {
+      toast('Cannot open media', `${path} has no payload.`, 'warning');
+      return;
+    }
+    if (!this.openTabs.includes(path)) this.openTabs.push(path);
+    this.activePath = path;
+    this.selectedPath = path;
+    this.welcome.classList.add('hidden');
+    const doc = await this.timelineStore.load();
+    await this.mediaView.show({
+      path,
+      blob,
+      size: this.workspace.sizeOf(path),
+      adjustments: doc.adjustments[path],
+    });
+    this.setActiveView('media');
+    this.renderExplorer();
+    this.renderSidebar();
+    this.renderStatus();
+    await this.ensureTimelineAsset(path, blob);
+  }
+
+  /** Probes a media file once so the timeline can place it. */
+  private async ensureTimelineAsset(path: string, blob: Blob): Promise<void> {
+    const kind = mediaKind(path);
+    if (!kind) return;
+    if (this.timelineStore.current?.assets[path]) return;
+    const probe = await probeMedia(blob, kind);
+    const durationMs =
+      kind === 'image'
+        ? DEFAULT_IMAGE_DURATION_MS
+        : probe.durationMs >= MIN_CLIP_MS
+          ? probe.durationMs
+          : probe.durationMs;
+    const asset: MediaAsset = {
+      path,
+      kind,
+      durationMs,
+      width: probe.width || undefined,
+      height: probe.height || undefined,
+      mime: blob.type || mimeForMedia(path),
+    };
+    this.timelineStore.registerAsset(asset);
+  }
+
+  /** Adds the previewed media to its track at the playhead. */
+  private async addMediaToTimeline(path: string): Promise<void> {
+    await this.timelineStore.load();
+    let doc = this.timelineStore.current;
+    if (!doc) return;
+    const asset = doc.assets[path];
+    if (!asset || asset.durationMs < MIN_CLIP_MS) {
+      toast('Cannot add to timeline', 'The media duration is unknown.', 'warning');
+      return;
+    }
+    const kind = trackKindFor(asset.kind);
+    let track = doc.tracks.find((entry) => entry.kind === kind);
+    if (!track) {
+      doc = addTrack(doc, kind);
+      track = doc.tracks[doc.tracks.length - 1];
+    }
+    if (!track) return;
+    const startAt = Math.max(trackEnd(track), this.timelinePlayheadMs);
+    doc = addClip(doc, track.id, path, startAt);
+    this.timelineStore.update(doc);
+    this.showTimeline();
+    toast('Added to timeline', basename(path), 'success', 1400);
   }
 
   private async openBinaryFile(path: string): Promise<void> {
     const entry = this.workspace.get(path);
     if (entry?.type !== 'file') return;
-    const size = entry.binary ? base64ByteLength(entry.content) : entry.content.length;
+    const size = this.workspace.sizeOf(path);
     const result = await openDialog({
       title: path,
       body: `Binary file — ${formatBytes(size)}\n\nCompiled artifacts and other binaries are stored in IndexedDB and included in Export ZIP. They are not opened in Monaco.`,
@@ -887,16 +1172,15 @@ export class App implements ShellHostish {
         { label: 'Download', value: 'download', primary: true },
       ],
     });
-    if (result === 'download') this.downloadFile(path);
+    if (result === 'download') void this.downloadFile(path);
   }
 
-  downloadFile(path: string): void {
-    const bytes = this.workspace.readBytes(path);
-    if (!bytes) {
-      toast('Download failed', `${path} is not a file.`, 'error');
+  async downloadFile(path: string): Promise<void> {
+    const blob = await this.workspace.readBlob(path);
+    if (!blob) {
+      toast('Download failed', `${path} is not a binary file.`, 'error');
       return;
     }
-    const blob = new Blob([bytes.slice().buffer], { type: 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
@@ -907,6 +1191,7 @@ export class App implements ShellHostish {
 
   private async closeFile(path: string, discard = false): Promise<void> {
     if (!discard && this.editor.isDirty(path)) await this.saveFile(path);
+    if (this.mediaView.currentSourcePath === path) this.mediaView.clear();
     this.editor.close(path);
     const index = this.openTabs.indexOf(path);
     if (index >= 0) this.openTabs.splice(index, 1);
@@ -968,14 +1253,14 @@ export class App implements ShellHostish {
   // Test Play
   // ------------------------------------------------------------
   runTestPlay(): void {
-    void this.executeTestPlay();
+    void this.executeTestPlay(true);
   }
 
-  private async executeTestPlay(): Promise<void> {
+  private async executeTestPlay(showPreview: boolean): Promise<void> {
     const files: PlayFile[] = [];
     for (const path of this.workspace.filePaths()) {
       if (!isPlayPayloadPath(path)) continue;
-      const bytes = this.workspace.readBytes(path);
+      const bytes = await this.workspace.readBytes(path);
       if (bytes) files.push({ path, bytes });
     }
 
@@ -990,10 +1275,13 @@ export class App implements ShellHostish {
       return;
     }
 
-    this.setPlayVisible(true);
+    if (showPreview) this.setActiveView('play');
+    // The shell shows its own loading and error state, so the placeholder
+    // steps aside as soon as a run starts.
+    this.playHasRun = true;
+    this.playEmpty.classList.add('hidden');
     try {
       await this.playHost.execute(payload);
-      this.playHasRun = true;
       this.log(
         `Test Play started: ${payload.entry} (${payload.files.length} files, ${formatBytes(payload.totalBytes)})`,
       );
@@ -1011,20 +1299,14 @@ export class App implements ShellHostish {
     this.log('Test Play stopped.');
   }
 
-  private setPlayVisible(visible: boolean): void {
-    if (this.playVisible === visible) return;
-    this.playVisible = visible;
-    this.playPane.classList.toggle('hidden', !visible);
-    window.setTimeout(() => this.layout(), 0);
-  }
-
   private schedulePlayReload(): void {
     if (!this.settings.playAutoReload) return;
-    if (!this.playVisible || !this.playHasRun) return;
+    if (!this.playHasRun) return;
     if (this.playReloadTimer !== undefined) window.clearTimeout(this.playReloadTimer);
     this.playReloadTimer = window.setTimeout(() => {
       this.playReloadTimer = undefined;
-      void this.executeTestPlay();
+      // Auto reload keeps the current view: saving must not steal the tab.
+      void this.executeTestPlay(false);
     }, 450);
   }
 
@@ -1041,6 +1323,20 @@ export class App implements ShellHostish {
     const labelEl = this.runPill.querySelector('.run-pill-label');
     if (labelEl) labelEl.textContent = label;
     this.runPill.title = detail ? `Test Play: ${detail}` : `Test Play (${modShortcut('Shift+Enter')})`;
+    this.playStatus.dataset.state = status;
+    this.playStatus.textContent =
+      status === 'loading'
+        ? 'Loading…'
+        : status === 'running'
+          ? 'Running'
+          : status === 'error'
+            ? 'Failed'
+            : 'Idle';
+    this.playStatus.title = detail ?? '';
+    if (this.playStatusState !== status) {
+      this.playStatusState = status;
+      this.renderTabs();
+    }
   }
 
   // ------------------------------------------------------------
@@ -1163,6 +1459,10 @@ export class App implements ShellHostish {
     const file = this.importInput.files?.[0];
     this.importInput.value = '';
     if (!file) return;
+    await this.importZipFile(file);
+  }
+
+  private async importZipFile(file: File): Promise<void> {
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
       const result = await this.workspace.importZipBytes(bytes);
@@ -1178,9 +1478,120 @@ export class App implements ShellHostish {
     }
   }
 
-  exportWorkspace(): void {
+  /** Drag and drop: ZIPs expand, media becomes blobs, text stays text. */
+  private bindDropZone(): void {
+    let depth = 0;
+    const carriesFiles = (event: DragEvent) => [...(event.dataTransfer?.types ?? [])].includes('Files');
+
+    const show = (visible: boolean) => this.dropOverlay.classList.toggle('hidden', !visible);
+
+    window.addEventListener('dragenter', (event) => {
+      if (!carriesFiles(event)) return;
+      event.preventDefault();
+      depth += 1;
+      show(true);
+    });
+    window.addEventListener('dragover', (event) => {
+      if (!carriesFiles(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    });
+    window.addEventListener('dragleave', (event) => {
+      if (!carriesFiles(event)) return;
+      depth = Math.max(0, depth - 1);
+      if (depth === 0 || event.relatedTarget === null) {
+        depth = 0;
+        show(false);
+      }
+    });
+    window.addEventListener('drop', (event) => {
+      if (!carriesFiles(event)) return;
+      event.preventDefault();
+      depth = 0;
+      show(false);
+      const files = [...(event.dataTransfer?.files ?? [])];
+      if (files.length > 0) void this.importDroppedFiles(files);
+    });
+  }
+
+  /** Imports dropped files: archives are expanded, media stored as blobs. */
+  async importDroppedFiles(files: File[]): Promise<void> {
+    const existing = new Set(this.workspace.filePaths());
+    const failures: string[] = [];
+    let first: string | null = null;
+    let imported = 0;
+
+    for (const file of files) {
+      try {
+        if (/\.zip$/i.test(file.name) || file.type === 'application/zip') {
+          const result = await this.workspace.importZipBytes(new Uint8Array(await file.arrayBuffer()));
+          imported += result.imported;
+          this.log(`Imported ${result.imported} file(s) from ${file.name}.`);
+          continue;
+        }
+        const name = normalizePath(file.name || 'file') || 'file';
+        const path = uniquePath(existing, name);
+        existing.add(path);
+        if (isMediaPath(path)) {
+          await this.workspace.writeBinaryFile(path, file, file.type || mimeForMedia(path));
+          first ??= path;
+        } else {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          const text = tryDecodeText(bytes);
+          if (text !== null) await this.workspace.writeFile(path, text);
+          else await this.workspace.writeBinaryFile(path, bytes, file.type || undefined);
+        }
+        imported += 1;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        failures.push(`${file.name}: ${message}`);
+      }
+    }
+
+    this.renderExplorer();
+    if (imported > 0) {
+      this.log(`Imported ${imported} dropped file(s).`);
+      toast('Drop import complete', `${imported} file(s) imported.`, 'success', 1800);
+    }
+    for (const failure of failures) toast('Import failed', failure, 'error');
+    if (first) this.openFile(first);
+  }
+
+  private async handleMediaImport(): Promise<void> {
+    const files = [...(this.mediaInput.files ?? [])];
+    this.mediaInput.value = '';
+    if (files.length === 0) return;
+    await this.importMediaFiles(files);
+  }
+
+  /** Stores picked media as blobs (no ZIP round-trip, no base64). */
+  async importMediaFiles(files: File[]): Promise<void> {
+    const existing = new Set(this.workspace.filePaths());
+    let first: string | null = null;
+    let imported = 0;
+    for (const file of files) {
+      try {
+        const name = normalizePath(file.name || 'media') || 'media';
+        const path = uniquePath(existing, name);
+        existing.add(path);
+        await this.workspace.writeBinaryFile(path, file, file.type || undefined);
+        imported += 1;
+        if (!first) first = path;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        toast('Import failed', `${file.name}: ${message}`, 'error');
+      }
+    }
+    if (imported === 0) return;
+    this.renderExplorer();
+    this.log(`Imported ${imported} media file(s).`);
+    toast('Media imported', `${imported} file(s)`, 'success', 1800);
+    if (first) this.openFile(first);
+  }
+
+  async exportWorkspace(): Promise<void> {
     try {
-      const bytes = this.workspace.exportZip();
+      const bytes = await this.workspace.exportZip();
       const blob = new Blob([bytes.slice().buffer], { type: 'application/zip' });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
@@ -1223,6 +1634,7 @@ export class App implements ShellHostish {
       tab('terminal', 'Terminal'),
       tab('output', 'Output'),
       tab('problems', 'Problems', 0),
+      tab('timeline', 'Timeline'),
       el('div', { class: 'panel-spacer' }),
       el('div', { class: 'panel-actions' }, [
         iconButton('trash', 'Clear output', () => this.clearOutput(), { size: 14 }),
@@ -1248,6 +1660,16 @@ export class App implements ShellHostish {
     this.root.classList.toggle('is-panel-hidden', !this.panelVisible);
     this.layout();
     if (this.panelVisible) this.shell.fit();
+  }
+
+  private handleTimelineChange(): void {
+    this.timeline.render();
+  }
+
+  private showTimeline(): void {
+    this.panelVisible = true;
+    this.root.classList.remove('is-panel-hidden');
+    this.selectPanel('timeline');
   }
 
   private showTerminal(): void {
@@ -1281,28 +1703,61 @@ export class App implements ShellHostish {
   }
 
   private bindResizer(resizer: HTMLElement): void {
-    resizer.addEventListener('pointerdown', (event) => {
-      event.preventDefault();
-      resizer.setPointerCapture(event.pointerId);
-      const startY = event.clientY;
-      const startHeight = this.panel.getBoundingClientRect().height;
-      const onMove = (moveEvent: PointerEvent) => {
-        const next = Math.max(
-          110,
-          Math.min(window.innerHeight * 0.7, startHeight + (startY - moveEvent.clientY)),
-        );
+    let startHeight = 0;
+    bindDragHandle(resizer, {
+      onStart: () => {
+        startHeight = this.panel.getBoundingClientRect().height;
+      },
+      onDrag: ({ y }) => {
+        const next = Math.max(110, Math.min(window.innerHeight * 0.7, startHeight - y));
         document.documentElement.style.setProperty('--panel-h', `${Math.round(next)}px`);
         this.layout();
-      };
-      const onUp = () => {
-        resizer.removeEventListener('pointermove', onMove);
-        resizer.removeEventListener('pointerup', onUp);
+      },
+      onEnd: () => {
         this.layout();
         this.shell.fit();
-      };
-      resizer.addEventListener('pointermove', onMove);
-      resizer.addEventListener('pointerup', onUp);
+      },
     });
+  }
+
+  /** Dragging the explorer border changes the sidebar width. */
+  private bindSidebarResizer(): void {
+    const handle = this.sidebarResizer;
+    let startWidth = 0;
+    bindDragHandle(handle, {
+      onStart: () => {
+        startWidth = this.sidebar.getBoundingClientRect().width;
+      },
+      onDrag: ({ x }) => {
+        this.setSidebarWidth(clampSidebarWidth(startWidth + x, window.innerWidth));
+      },
+      onEnd: () => this.saveLayout(),
+    });
+    bindSeparatorKeys(handle, {
+      axis: 'horizontal',
+      step: 16,
+      onStep: (delta) => {
+        const current = this.sidebar.getBoundingClientRect().width;
+        this.setSidebarWidth(clampSidebarWidth(current + delta, window.innerWidth));
+      },
+    });
+  }
+
+  private setSidebarWidth(width: number): void {
+    this.layoutSizes.sidebarWidth = width;
+    document.documentElement.style.setProperty('--sidebar-w', `${width}px`);
+    this.syncResizerValues();
+  }
+
+  private syncResizerValues(): void {
+    this.sidebarResizer.setAttribute(
+      'aria-valuenow',
+      String(Math.round(this.sidebar.getBoundingClientRect().width)),
+    );
+  }
+
+  private saveLayout(): void {
+    saveLayoutSizes(this.layoutSizes);
   }
 
   private layout(): void {
@@ -1350,9 +1805,14 @@ export class App implements ShellHostish {
     }
     const language = this.statusbar.querySelector<HTMLElement>('[data-status="language"]');
     if (language) {
+      const media = this.activePath ? mediaKind(this.activePath) : null;
       language.replaceChildren(
         icon(fileIcon(this.activePath ?? ''), 11),
-        this.activePath ? languageForPath(this.activePath) : 'Plain Text',
+        this.activePath
+          ? media
+            ? media[0]?.toUpperCase() + media.slice(1)
+            : languageForPath(this.activePath)
+          : 'Plain Text',
       );
     }
     const vm = this.statusbar.querySelector<HTMLElement>('[data-status="vm"]');
@@ -1602,7 +2062,7 @@ export class App implements ShellHostish {
         icon: 'download',
         run: () => {
           const target = this.selectedPath ?? this.activePath;
-          if (target) this.downloadFile(target);
+          if (target) void this.downloadFile(target);
         },
       },
       {
@@ -1613,11 +2073,18 @@ export class App implements ShellHostish {
         run: () => this.importInput.click(),
       },
       {
+        id: 'file.media',
+        label: 'Workspace: Import Media…',
+        group: 'Workspace',
+        icon: 'file-image',
+        run: () => this.mediaInput.click(),
+      },
+      {
         id: 'file.export',
         label: 'Workspace: Export ZIP',
         group: 'Workspace',
         icon: 'upload',
-        run: () => this.exportWorkspace(),
+        run: () => void this.exportWorkspace(),
       },
       {
         id: 'workspace.rename',
@@ -1679,10 +2146,10 @@ export class App implements ShellHostish {
       },
       {
         id: 'view.play',
-        label: 'View: Toggle Test Play Pane',
+        label: 'View: Toggle Test Play',
         group: 'View',
         icon: 'panel-right',
-        run: () => this.setPlayVisible(!this.playVisible),
+        run: () => this.setActiveView(this.activeView === 'play' ? 'editor' : 'play'),
       },
       {
         id: 'view.settings',

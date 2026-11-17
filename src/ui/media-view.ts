@@ -1,0 +1,304 @@
+/**
+ * Media preview pane for the editor area.
+ *
+ * Opens images, video and audio from the workspace (blobs, never Monaco).
+ * Image/video adjustments are non-destructive view parameters that live in the
+ * timeline document, so the preview and the timeline agree on them.
+ */
+
+import { el, formatBytes, iconButton } from '../lib/dom';
+import { fileIcon, icon } from '../lib/icons';
+import {
+  DEFAULT_MEDIA_ADJUSTMENTS,
+  type MediaAdjustments,
+  type MediaKind,
+  mediaKind,
+  probeMedia,
+} from '../lib/media';
+
+export interface MediaSource {
+  path: string;
+  blob: Blob;
+  size: number;
+  adjustments?: Partial<MediaAdjustments>;
+}
+
+export interface MediaViewOptions {
+  /** Adds the current source to the timeline at the playhead. */
+  onAddToTimeline: (path: string) => void;
+  /** Persists changed adjustments for a source path. */
+  onAdjustmentsChange: (path: string, adjustments: MediaAdjustments) => void;
+}
+
+const ADJUSTMENT_CONTROLS: Array<{ key: 'brightness' | 'contrast' | 'saturation'; label: string }> = [
+  { key: 'brightness', label: 'Brightness' },
+  { key: 'contrast', label: 'Contrast' },
+  { key: 'saturation', label: 'Saturation' },
+];
+
+export class MediaView {
+  readonly host: HTMLElement;
+  private readonly title: HTMLElement;
+  private readonly headIcon: HTMLElement;
+  private readonly badge: HTMLElement;
+  private readonly meta: HTMLElement;
+  private readonly stage: HTMLElement;
+  private readonly controls: HTMLElement;
+  private readonly empty: HTMLElement;
+  private readonly addButton: HTMLButtonElement;
+  private readonly rotateButton: HTMLButtonElement;
+  private readonly flipButton: HTMLButtonElement;
+  private readonly sliders = new Map<string, HTMLInputElement>();
+
+  private currentPath: string | null = null;
+  private currentKind: MediaKind | null = null;
+  private adjustments: MediaAdjustments = { ...DEFAULT_MEDIA_ADJUSTMENTS };
+  private media: HTMLImageElement | HTMLVideoElement | null = null;
+  private url: string | null = null;
+  private probe: { durationMs: number; width: number; height: number } | null = null;
+  private sequence = 0;
+
+  constructor(private readonly options: MediaViewOptions) {
+    this.title = el('span', { class: 'media-title', text: 'Media' });
+    this.headIcon = el('span', { class: 'media-head-icon' }, [icon('file-image', 13)]);
+    this.badge = el('span', { class: 'media-badge hidden' });
+    this.meta = el('span', { class: 'media-meta' });
+    this.stage = el('div', { class: 'media-stage' });
+    this.empty = el('div', { class: 'media-empty' }, [
+      el('span', { class: 'media-empty-icon' }, [icon('file-image', 20)]),
+      el('span', { class: 'media-empty-title', text: 'No media selected' }),
+      el('span', {
+        class: 'media-empty-hint',
+        text: 'Open an image, video or audio file, or import media from the explorer.',
+      }),
+    ]);
+    this.addButton = el(
+      'button',
+      { class: 'btn btn-primary media-add', type: 'button', on: { click: () => this.addToTimeline() } },
+      [icon('plus', 13), 'Add to timeline'],
+    ) as HTMLButtonElement;
+    this.rotateButton = iconButton('rotate-cw', 'Rotate 90°', () => this.rotate(), { size: 14 });
+    this.flipButton = iconButton('external', 'Flip horizontally', () => this.flip(), { size: 14 });
+
+    this.controls = el('div', { class: 'media-controls' });
+    for (const control of ADJUSTMENT_CONTROLS) {
+      const input = el('input', {
+        class: 'media-range',
+        type: 'range',
+        attrs: {
+          min: '0',
+          max: '200',
+          step: '1',
+          value: '100',
+          'aria-label': control.label,
+        },
+        on: { input: () => this.readSliders() },
+      }) as HTMLInputElement;
+      this.sliders.set(control.key, input);
+      this.controls.append(
+        el('label', { class: 'media-control' }, [
+          el('span', { class: 'media-control-label', text: control.label }),
+          input,
+        ]),
+      );
+    }
+
+    const head = el('div', { class: 'media-head' }, [
+      this.headIcon,
+      this.title,
+      this.badge,
+      el('div', { class: 'media-head-spacer' }),
+      this.rotateButton,
+      this.flipButton,
+      iconButton('refresh', 'Reset adjustments', () => this.reset(), { size: 14 }),
+      this.addButton,
+    ]);
+
+    this.host = el('div', { class: 'media-view', attrs: { 'aria-label': 'Media preview' } }, [
+      head,
+      this.controls,
+      el('div', { class: 'media-body' }, [this.stage, this.empty]),
+      el('div', { class: 'media-foot' }, [this.meta]),
+    ]);
+    this.setControls(null);
+  }
+
+  /** Path currently on screen, or null after `clear()`. */
+  get currentSourcePath(): string | null {
+    return this.currentPath;
+  }
+
+  /** Shows a source, reusing the blob URL when it is already on screen. */
+  async show(source: MediaSource): Promise<void> {
+    const kind = mediaKind(source.path);
+    if (!kind) {
+      this.clear();
+      return;
+    }
+    const sameSource = this.currentPath === source.path && this.url !== null;
+    this.currentPath = source.path;
+    this.currentKind = kind;
+    this.adjustments = { ...DEFAULT_MEDIA_ADJUSTMENTS, ...source.adjustments };
+    this.title.textContent = source.path.split('/').pop() ?? source.path;
+    this.title.title = source.path;
+    this.badge.textContent = kind;
+    this.badge.dataset.kind = kind;
+    this.badge.classList.remove('hidden');
+    this.empty.classList.add('hidden');
+    this.host.dataset.kind = kind;
+    this.headIcon.replaceChildren(icon(fileIcon(source.path), 13));
+    this.setControls(kind);
+
+    if (!sameSource) {
+      this.releaseUrl();
+      this.url = URL.createObjectURL(source.blob);
+      this.stage.replaceChildren();
+      this.media = this.buildMedia(kind, this.url);
+      if (this.media) this.stage.appendChild(this.media);
+      this.probe = null;
+      const ticket = ++this.sequence;
+      void probeMedia(source.blob, kind).then((probe) => {
+        if (ticket !== this.sequence) return;
+        this.probe = probe;
+        this.renderMeta(source.size, source.blob.type);
+      });
+    }
+    this.syncSliders();
+    this.applyAdjustments();
+    this.renderMeta(source.size, source.blob.type);
+  }
+
+  /** Drops the current source and revokes its blob URL. */
+  clear(): void {
+    this.sequence += 1;
+    this.releaseUrl();
+    this.media = null;
+    this.currentPath = null;
+    this.currentKind = null;
+    this.probe = null;
+    this.stage.replaceChildren();
+    this.empty.classList.remove('hidden');
+    this.badge.classList.add('hidden');
+    this.title.textContent = 'Media';
+    this.title.title = '';
+    this.meta.textContent = '';
+    this.host.dataset.kind = '';
+    this.headIcon.replaceChildren(icon('file-image', 13));
+    this.setControls(null);
+  }
+
+  private buildMedia(kind: MediaKind, url: string): HTMLImageElement | HTMLVideoElement | null {
+    if (kind === 'image') {
+      return el('img', {
+        class: 'media-image',
+        attrs: { src: url, alt: '', draggable: 'false' },
+      }) as HTMLImageElement;
+    }
+    if (kind === 'video') {
+      const video = el('video', {
+        class: 'media-video',
+        attrs: { src: url, controls: 'true', playsinline: 'true', preload: 'metadata' },
+      }) as HTMLVideoElement;
+      return video;
+    }
+    this.stage.appendChild(
+      el('audio', {
+        class: 'media-audio-controls',
+        attrs: { src: url, controls: 'true', preload: 'metadata' },
+      }),
+    );
+    return null;
+  }
+
+  private renderMeta(size: number, mime: string): void {
+    const parts = [formatBytes(size)];
+    if (mime) parts.push(mime);
+    if (this.probe) {
+      if (this.probe.width && this.probe.height) parts.push(`${this.probe.width}×${this.probe.height}`);
+      if (this.currentKind !== 'image' && this.probe.durationMs) {
+        parts.push(formatClock(this.probe.durationMs));
+      }
+    }
+    this.meta.textContent = parts.join(' · ');
+  }
+
+  private applyAdjustments(): void {
+    const { brightness, contrast, saturation, rotate, flip } = this.adjustments;
+    const filter = `brightness(${brightness}%) contrast(${contrast}%) saturate(${saturation}%)`;
+    const transform = `rotate(${rotate}deg) scaleX(${flip ? -1 : 1})`;
+    const style = `filter:${filter};transform:${transform}`;
+    this.host.style.setProperty('--media-filter', filter);
+    this.host.style.setProperty('--media-transform', transform);
+    if (this.media) this.media.setAttribute('style', style);
+  }
+
+  private syncSliders(): void {
+    for (const [key, input] of this.sliders) {
+      const value = this.adjustments[key as 'brightness' | 'contrast' | 'saturation'];
+      input.value = String(value);
+    }
+  }
+
+  private readSliders(): void {
+    const brightness = Number(this.sliders.get('brightness')?.value ?? 100);
+    const contrast = Number(this.sliders.get('contrast')?.value ?? 100);
+    const saturation = Number(this.sliders.get('saturation')?.value ?? 100);
+    this.adjustments = { ...this.adjustments, brightness, contrast, saturation };
+    this.applyAdjustments();
+    this.emit();
+  }
+
+  private rotate(): void {
+    const next = ((this.adjustments.rotate + 90) % 360) as MediaAdjustments['rotate'];
+    this.adjustments = { ...this.adjustments, rotate: next };
+    this.applyAdjustments();
+    this.emit();
+  }
+
+  private flip(): void {
+    this.adjustments = { ...this.adjustments, flip: !this.adjustments.flip };
+    this.applyAdjustments();
+    this.emit();
+  }
+
+  private reset(): void {
+    this.adjustments = { ...DEFAULT_MEDIA_ADJUSTMENTS };
+    this.syncSliders();
+    this.applyAdjustments();
+    this.emit();
+  }
+
+  private emit(): void {
+    if (!this.currentPath) return;
+    this.options.onAdjustmentsChange(this.currentPath, { ...this.adjustments });
+  }
+
+  private addToTimeline(): void {
+    if (this.currentPath) this.options.onAddToTimeline(this.currentPath);
+  }
+
+  /** Audio has no picture adjustments; every source can go to the timeline. */
+  private setControls(kind: MediaKind | null): void {
+    this.addButton.disabled = kind === null;
+    const adjustable = kind !== null && kind !== 'audio';
+    this.rotateButton.disabled = !adjustable;
+    this.flipButton.disabled = !adjustable;
+    for (const input of this.sliders.values()) input.disabled = !adjustable;
+    this.controls.classList.toggle('is-disabled', !adjustable);
+  }
+
+  private releaseUrl(): void {
+    if (this.url) URL.revokeObjectURL(this.url);
+    this.url = null;
+    if (this.currentKind === 'audio') this.stage.replaceChildren();
+  }
+}
+
+function formatClock(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const seconds = totalSeconds % 60;
+  const minutes = Math.floor(totalSeconds / 60) % 60;
+  const hours = Math.floor(totalSeconds / 3600);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`;
+}

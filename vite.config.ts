@@ -2,25 +2,45 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { defineConfig, type Plugin } from 'vite';
 
-// SYNC: relaxed CSP for the Test Play shell — keep this string identical to
-// public/_headers (`/play/*`) and scripts/serve-dist.mjs. The shell is the
+// SYNC: relaxed CSP for the Test Play documents — keep this string identical
+// to public/_headers (`/play/*`) and scripts/serve-dist.mjs. The shell is the
 // only document that embeds untrusted game content (sandboxed, no
-// allow-same-origin), so COEP and the strict studio CSP stay off under /play/.
+// allow-same-origin), so the strict studio CSP stays off under /play/.
 // The strict main CSP is production-only (_headers / serve-dist): dev must
 // keep an open connect-src for the HMR websocket.
-const PLAY_CSP = [
-  "default-src 'self' * data: blob:",
-  "script-src 'self' * data: blob: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
-  "worker-src 'self' * data: blob:",
-  "style-src 'self' * data: blob: 'unsafe-inline'",
-  "img-src 'self' * data: blob:",
-  "font-src 'self' * data: blob:",
-  "media-src 'self' * data: blob:",
-  "connect-src 'self' * data: blob:",
-  "frame-src 'self' * data: blob:",
-  "child-src 'self' * data: blob:",
+//
+// The trusted shell stays minimal (Flaxia's ZIP preview policy), while the
+// game document gets the game-facing policy with the `sandbox` directive that
+// forces an opaque origin even when the document is opened top-level
+// (Flaxia's SANDBOX_CSP).
+const PLAY_SHELL_CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "worker-src 'self' blob:",
+  "img-src 'self' data: blob:",
+  "font-src 'self'",
+  "connect-src 'self' data: blob:",
+  "frame-src 'self'",
   "object-src 'none'",
-  'base-uri *',
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'self'",
+].join('; ');
+
+const PLAY_RUNTIME_CSP = [
+  'sandbox allow-scripts allow-pointer-lock allow-forms allow-popups',
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https:",
+  "style-src 'self' 'unsafe-inline' data: blob: https:",
+  "worker-src 'self' blob:",
+  "img-src 'self' data: blob: https:",
+  "media-src 'self' data: blob: https:",
+  "font-src 'self' data: blob: https:",
+  "connect-src 'self' data: blob: https: wss:",
+  "frame-src 'self' blob: data: https:",
+  "object-src 'none'",
+  "base-uri 'none'",
   'form-action *',
   "frame-ancestors 'self'",
 ].join('; ');
@@ -40,7 +60,10 @@ function studioHeaders(): Plugin {
       res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
       res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
       res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Content-Security-Policy', PLAY_CSP);
+      res.setHeader(
+        'Content-Security-Policy',
+        path === '/play/runtime.html' ? PLAY_RUNTIME_CSP : PLAY_SHELL_CSP,
+      );
     } else {
       res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
     }

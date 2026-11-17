@@ -11,15 +11,23 @@
 # (sandboxed iframe, never allow-same-origin). The studio page is cross-origin
 # isolated (COEP: require-corp), so the shell must opt in with `credentialless`
 # to stay embeddable; the strict studio CSP is replaced with the relaxed game
-# CSP. SYNC: keep this CSP identical to vite.config.ts (PLAY_CSP) and
-# scripts/serve-dist.mjs (gameCsp).
+# CSP. SYNC: keep this CSP identical to vite.config.ts (PLAY_SHELL_CSP) and
+# scripts/serve-dist.mjs (playShellCsp).
 /play/*
   ! Content-Security-Policy
   ! Cross-Origin-Embedder-Policy
   Cross-Origin-Embedder-Policy: credentialless
   Cross-Origin-Resource-Policy: cross-origin
   Access-Control-Allow-Origin: *
-  Content-Security-Policy: default-src 'self' * data: blob:; script-src 'self' * data: blob: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; worker-src 'self' * data: blob:; style-src 'self' * data: blob: 'unsafe-inline'; img-src 'self' * data: blob:; font-src 'self' * data: blob:; media-src 'self' * data: blob:; connect-src 'self' * data: blob:; frame-src 'self' * data: blob:; child-src 'self' * data: blob:; object-src 'none'; base-uri *; form-action *; frame-ancestors 'self'
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' data: blob:; frame-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'
+
+# The game document itself. Its `sandbox` directive forces an opaque origin
+# even when the document is opened top-level, and the src lists match Flaxia's
+# SANDBOX_CSP. SYNC: keep identical to vite.config.ts (PLAY_RUNTIME_CSP) and
+# scripts/serve-dist.mjs (playRuntimeCsp).
+/play/runtime.html
+  ! Content-Security-Policy
+  Content-Security-Policy: sandbox allow-scripts allow-pointer-lock allow-forms allow-popups; default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https:; style-src 'self' 'unsafe-inline' data: blob: https:; worker-src 'self' blob:; img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; font-src 'self' data: blob: https:; connect-src 'self' data: blob: https: wss:; frame-src 'self' blob: data: https:; object-src 'none'; base-uri 'none'; form-action *; frame-ancestors 'self'
 
 /linux/manifest.json
   Cache-Control: no-cache

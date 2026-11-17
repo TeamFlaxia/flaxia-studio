@@ -30,17 +30,25 @@ test('workspace persists, renames, imports nested paths, and deletes', async () 
   assert.equal(workspace.readFile('moved/hello.ts'), null);
   assert.equal(workspace.readFile('top.txt'), 'top');
 
-  const exported = workspace.exportZip();
+  const exported = await workspace.exportZip();
   assert.ok(exported.byteLength > 0);
 
   const binary = new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 0x00, 0xff]);
   await workspace.writeBinaryFile('bin/hello', binary);
   assert.equal(workspace.isBinary('bin/hello'), true);
   assert.equal(workspace.readFile('bin/hello'), null);
-  assert.deepEqual([...(workspace.readBinary('bin/hello') ?? [])], [...binary]);
-  const reopenedBinary = await Workspace.open(workspace.id);
-  assert.deepEqual([...(reopenedBinary?.readBinary('bin/hello') ?? [])], [...binary]);
+  assert.equal(workspace.sizeOf('bin/hello'), binary.byteLength);
+  assert.deepEqual([...((await workspace.readBinary('bin/hello')) ?? [])], [...binary]);
+  const blob = await workspace.readBlob('bin/hello');
+  assert.equal(blob?.size, binary.byteLength);
 
-  const zipWithBinary = unzipSync(workspace.exportZip());
+  const reopenedBinary = await Workspace.open(workspace.id);
+  assert.deepEqual([...((await reopenedBinary?.readBinary('bin/hello')) ?? [])], [...binary]);
+
+  const zipWithBinary = unzipSync(await workspace.exportZip());
   assert.deepEqual([...(zipWithBinary['bin/hello'] ?? [])], [...binary]);
+
+  // Removing a file drops its blob payload too.
+  await workspace.remove('bin');
+  assert.equal(await workspace.readBlob('bin/hello'), null);
 });

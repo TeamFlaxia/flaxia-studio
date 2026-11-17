@@ -24,11 +24,13 @@ npm run test:e2e
 - Monaco workers are bundled with Vite `?worker` imports. Do not switch to the
   AMD loader.
 - `/workspace` sync handles UTF-8 text and binary artifacts (≤ 20 MiB each).
-  Binaries are base64-encoded in IndexedDB and must not be opened in Monaco.
+  Workspace binaries are stored as Blobs in IndexedDB (never base64) and must
+  not be opened in Monaco; media opens in the media preview pane instead.
 - Test Play has two CSPs. The studio page keeps the strict policy; `/play/*`
-  uses the relaxed game policy. The relaxed CSP string lives in three places —
+  uses the trusted shell policy and `/play/runtime.html` uses the game policy
+  (with the `sandbox` directive). Both strings live in three places —
   `public/_headers`, `scripts/serve-dist.mjs`, and `vite.config.ts` — and all
-  three must stay identical.
+  three must stay identical (`tests/play-csp.test.ts` guards it).
 - The game frame is sandboxed without `allow-same-origin`, so it has an opaque
   origin. Chromium refuses to load blob URLs created by another origin, which
   is why `public/play/runtime.js` creates the blobs inside the frame and the

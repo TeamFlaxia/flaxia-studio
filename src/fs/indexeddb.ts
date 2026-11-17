@@ -1,5 +1,5 @@
 export const DB_NAME = 'flaxia-studio';
-export const DB_VERSION = 1;
+export const DB_VERSION = 2;
 
 export interface WorkspaceRecord {
   id: string;
@@ -13,9 +13,22 @@ export interface FileRecord {
   workspaceId: string;
   path: string;
   type: 'file' | 'dir';
+  /** UTF-8 text, or base64 for legacy binary records (see `blobId`). */
   content: string;
   binary?: boolean;
+  /** Blob payload for binary files that are too big for base64. */
+  blobId?: string;
+  /** Byte length of a binary file. */
+  size?: number;
+  mime?: string;
   updatedAt: number;
+}
+
+/** A binary payload stored as-is, so video and audio never inflate to base64. */
+export interface BlobRecord {
+  id: string;
+  blob: Blob;
+  size: number;
 }
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -35,6 +48,11 @@ export function openDatabase(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains('kv')) {
         db.createObjectStore('kv', { keyPath: 'key' });
+      }
+      // v2: binary payloads live in their own store. Legacy base64 records in
+      // `files` keep working; they are upgraded the next time they are written.
+      if (!db.objectStoreNames.contains('blobs')) {
+        db.createObjectStore('blobs', { keyPath: 'id' });
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -99,6 +117,28 @@ export async function deleteFiles(ids: string[]): Promise<void> {
   const db = await openDatabase();
   const tx = db.transaction('files', 'readwrite');
   const store = tx.objectStore('files');
+  for (const id of ids) store.delete(id);
+  await transactionDone(tx);
+}
+
+export async function putBlob(record: BlobRecord): Promise<void> {
+  const db = await openDatabase();
+  const tx = db.transaction('blobs', 'readwrite');
+  tx.objectStore('blobs').put(record);
+  await transactionDone(tx);
+}
+
+export async function getBlob(id: string): Promise<BlobRecord | undefined> {
+  const db = await openDatabase();
+  const tx = db.transaction('blobs', 'readonly');
+  return requestToPromise(tx.objectStore('blobs').get(id));
+}
+
+export async function deleteBlobs(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const db = await openDatabase();
+  const tx = db.transaction('blobs', 'readwrite');
+  const store = tx.objectStore('blobs');
   for (const id of ids) store.delete(id);
   await transactionDone(tx);
 }

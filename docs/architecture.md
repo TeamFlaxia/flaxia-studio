@@ -34,6 +34,11 @@
 | `src/editor/monaco.ts`           | Monaco setup, workers, themes, models, dirty state               |
 | `src/fs/`                        | Path rules, IndexedDB persistence, ZIP import/export             |
 | `src/play/`                      | Test Play policy, URL rewriting, host/shell bridge               |
+| `src/lib/media.ts`               | Media classification, MIME map, duration/size probing            |
+| `src/lib/timeline.ts`            | Timeline document and pure editing operations (trim/split/move)  |
+| `src/ui/media-view.ts`           | Image/video/audio preview pane and adjustments                   |
+| `src/ui/timeline-view.ts`        | Timeline panel: ruler, tracks, playhead, playback                |
+| `src/ui/timeline-store.ts`       | `.flaxia/timeline.json` persistence with debounced saves         |
 | `src/linux/manifest.ts`          | Manifest validation and chunk URL resolution                     |
 | `src/linux/runtime.ts`           | Worker lifecycle, boot, progress, command queue, cache           |
 | `src/terminal/shell.ts`          | xterm shell, local commands, Linux routing                       |
@@ -63,10 +68,12 @@ QEMU/Emscripten image, not interchangeable with the WASI/Bochs image used here.
    `chmod -R u+rwx` (the virtio-9p preopen does not carry POSIX mode bits), runs
    the command there, then copies the result back.
 5. The worker walks the preopen directory. UTF-8 files are returned as text;
-   everything else is base64-encoded with `binary: true` (≤ 20 MiB each).
+   everything else is base64-encoded **on the worker boundary** with
+   `binary: true` (≤ 20 MiB each), and the studio stores it as a Blob.
 6. `App.syncGuestFiles()` applies creates/updates/deletes to IndexedDB, stores
-   binaries with `writeBinaryFile()`, prunes empty directories, and refreshes
-   Monaco models. Binaries open a metadata/download dialog instead of Monaco.
+   binaries with `writeBinaryFile()` (a Blob, not base64), prunes empty
+   directories, and refreshes Monaco models. Media opens in the preview; other
+   binaries open a metadata/download dialog instead of Monaco.
 
 The sync is last-write-wins. A dirty editor is saved before a Linux command, and
 the guest is authoritative for the command that just ran.
@@ -111,6 +118,30 @@ studio page (strict CSP, COEP: require-corp)
 `allow-same-origin` is never granted, so the game frame has an opaque origin:
 `localStorage` and cookies are unavailable to previewed code. `fetch()` for
 workspace files is bridged by the runtime.
+
+The preview is a **tab in the editor area**, not a split view: `App.setActiveView`
+swaps the editor column for the preview pane, so editing and previewing never
+share the space. Auto reload re-runs the preview in the background and keeps the
+current tab — saving never pulls the user away from the editor.
+
+### Rules (mirrored from Flaxia Arcade)
+
+The studio runs the workspace under the same policy as a published game, so a
+preview can not do anything Arcade would not allow.
+
+| Rule                                                                                   | Where                                                                                               |
+| -------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Allowlist, 1024 files, 100 MB extracted, 25 MB transfer, 255-char paths, depth 10      | `src/play/policy.ts`                                                                                |
+| No traversal, absolute paths, dotfiles, control characters or duplicates               | `src/play/policy.ts` (`playPathProblem`)                                                            |
+| `allow-scripts allow-pointer-lock allow-forms allow-popups`, never `allow-same-origin` | `src/play/policy.ts`, `src/play/shell.ts`                                                           |
+| Shell policy (trusted wrapper) + game policy (CSP `sandbox` directive)                 | `vite.config.ts`, `scripts/serve-dist.mjs`, `public/_headers` — guarded by `tests/play-csp.test.ts` |
+| `localStorage` seeded from `flaxia:studio:<workspace>` and writes relayed              | `src/play/storage.ts`, `public/play/runtime.js`                                                     |
+| `document.cookie` degrades to an empty string                                          | `public/play/runtime.js`                                                                            |
+| `<base>` / `<meta http-equiv>` stripped, `GET`/`HEAD` only for assets                  | `public/play/runtime.js`                                                                            |
+
+The runtime frame has an opaque origin, so `src/play/runtime.js` creates the blob
+URLs inside the frame (Chromium refuses a blob URL made by another origin). The
+seed travels with the execute payload; writes travel back through the shell.
 
 ## Headers
 

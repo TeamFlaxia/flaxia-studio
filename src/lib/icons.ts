@@ -11,6 +11,8 @@ export type IconName =
   | 'settings'
   | 'terminal'
   | 'play'
+  | 'stop'
+  | 'scissors'
   | 'save'
   | 'download'
   | 'upload'
@@ -43,6 +45,8 @@ export type IconName =
   | 'file-json'
   | 'file-text'
   | 'file-image'
+  | 'file-video'
+  | 'file-audio'
   | 'file-archive'
   | 'container'
   | 'hard-drive'
@@ -98,6 +102,14 @@ const ICONS: Record<IconName, IconNode> = {
     ['path', { d: 'M12 19h8' }],
   ],
   play: [['polygon', { points: '6 3 20 12 6 21 6 3' }]],
+  stop: [['rect', { x: '6', y: '6', width: '12', height: '12', rx: '2' }]],
+  scissors: [
+    ['circle', { cx: '6', cy: '6', r: '3' }],
+    ['path', { d: 'M8.12 8.12 12 12' }],
+    ['path', { d: 'M20 4 8.12 15.88' }],
+    ['circle', { cx: '6', cy: '18', r: '3' }],
+    ['path', { d: 'M14.8 14.8 20 20' }],
+  ],
   save: [
     [
       'path',
@@ -284,6 +296,18 @@ const ICONS: Record<IconName, IconNode> = {
     ['circle', { cx: '10', cy: '12', r: '2' }],
     ['path', { d: 'm20 17-1.296-1.296a2.41 2.41 0 0 0-3.408 0L9 22' }],
   ],
+  'file-video': [
+    ['path', { d: 'M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z' }],
+    ['path', { d: 'M14 2v4a2 2 0 0 0 2 2h4' }],
+    ['path', { d: 'm10 11 5 3-5 3v-6Z' }],
+  ],
+  'file-audio': [
+    ['path', { d: 'M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z' }],
+    ['path', { d: 'M14 2v4a2 2 0 0 0 2 2h4' }],
+    ['path', { d: 'M9 18v-6l4-2v6' }],
+    ['circle', { cx: '8', cy: '18', r: '1.6' }],
+    ['circle', { cx: '12', cy: '16', r: '1.6' }],
+  ],
   'file-archive': [
     ['path', { d: 'M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z' }],
     ['path', { d: 'M14 2v4a2 2 0 0 0 2 2h4' }],
@@ -367,7 +391,9 @@ export function fileIcon(path: string): IconName {
   if (/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(lower)) return 'file-code';
   if (/\.(json|jsonc)$/.test(lower)) return 'file-json';
   if (/\.(md|markdown|txt|log)$/.test(lower)) return 'file-text';
-  if (/\.(png|jpe?g|gif|webp|svg|ico|bmp)$/.test(lower)) return 'file-image';
+  if (/\.(png|jpe?g|gif|webp|svg|ico|bmp|avif)$/.test(lower)) return 'file-image';
+  if (/\.(mp4|webm|mov|m4v|ogv|mkv)$/.test(lower)) return 'file-video';
+  if (/\.(mp3|wav|ogg|oga|m4a|aac|flac|opus)$/.test(lower)) return 'file-audio';
   if (/\.(zip|tar|gz|tgz|wasm)$/.test(lower)) return 'file-archive';
   return 'file';
 }

@@ -145,6 +145,7 @@ async function run(message: Extract<PlayHostMessage, { type: 'play:execute' }>):
             bytes: file.bytes,
           })),
           texts,
+          storage: message.storage,
         },
       },
       '*',
@@ -192,6 +193,17 @@ window.addEventListener('message', (event: MessageEvent) => {
   // Runtime → shell (the runtime frame has an opaque origin).
   if (!currentFrame || event.source !== currentFrame.contentWindow || event.origin !== 'null') return;
   if (!isPlayRuntimeMessage(event.data)) return;
+  // The game frame has no storage of its own, so writes travel up to the
+  // studio, which keeps them in a workspace-scoped save.
+  if (event.data.type === 'play:storage-write') {
+    post({
+      type: 'play:storage-write',
+      operation: event.data.operation,
+      key: event.data.key,
+      value: event.data.value,
+    });
+    return;
+  }
   for (const waiter of [...runtimeWaiters]) {
     if (!waiter.match(event.data)) continue;
     const index = runtimeWaiters.indexOf(waiter);
