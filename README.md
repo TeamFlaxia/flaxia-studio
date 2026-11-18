@@ -20,6 +20,10 @@ quiet-craft surface language of Flaxia: emerald accents, 1px hairlines,
   and a Premiere-style **timeline** in the bottom panel (trim, split, move, snap)
 - **Preview monitor**: composites the timeline on a canvas with a transport,
   frame stepping, timecode and fullscreen
+- **Connections**: sign in with a Flaxia account and link OpenCode through the
+  OAuth device flow. The token is sealed by Flaxia Auth and stored as an
+  encrypted `oauth_connection` item in the Personal Vault. Run
+  _Connections: Flaxia Account & OpenCode…_ from the command palette
 - Light / dark / system themes with FOUC-free boot
 - **Test Play**: run the workspace `index.html` in a sandboxed preview **tab**,
   with a ~450 ms auto reload after every save
@@ -39,6 +43,11 @@ npm run dev
 ```
 
 Open <http://localhost:4173>.
+
+The Connections dialog talks to `https://auth.flaxia.app` by default. To use a
+local `flaxia-auth` Worker, set `VITE_AUTH_ORIGIN=http://localhost:8787` (see
+`.env.example`). `flaxia-auth` allows the Studio dev origins, so the Auth
+session cookie works without a proxy.
 
 The editor works immediately. The Linux panel needs an image:
 
