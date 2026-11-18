@@ -20,10 +20,9 @@ quiet-craft surface language of Flaxia: emerald accents, 1px hairlines,
   and a Premiere-style **timeline** in the bottom panel (trim, split, move, snap)
 - **Preview monitor**: composites the timeline on a canvas with a transport,
   frame stepping, timecode and fullscreen
-- **Connections**: sign in with a Flaxia account and link OpenCode through the
-  OAuth device flow. The token is sealed by Flaxia Auth and stored as an
-  encrypted `oauth_connection` item in the Personal Vault. Run
-  _Connections: Flaxia Account & OpenCode…_ from the command palette
+- **Connections**: show the Flaxia account and the services linked to it.
+  Connections are created and removed in Flaxia settings; Studio links there.
+  Run _Connections: Flaxia Account…_ from the command palette
 - Light / dark / system themes with FOUC-free boot
 - **Test Play**: run the workspace `index.html` in a sandboxed preview **tab**,
   with a ~450 ms auto reload after every save

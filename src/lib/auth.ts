@@ -5,11 +5,15 @@
 // `SameSite=Lax`; both origins share the `flaxia.app` site, so the browser
 // sends it on credentialed fetches. Auth allows these origins explicitly
 // (`src/origin.ts` in flaxia-auth).
+//
+// Connections are created and removed in Flaxia settings. Studio only reads
+// the metadata so it can show the account state and link to the manager.
 
-// `import.meta.env` exists in Vite and is absent under `node --test`.
-const viteEnv = (import.meta as ImportMeta & { env?: { VITE_AUTH_ORIGIN?: string } }).env;
+export const AUTH_ORIGIN = (
+  (import.meta.env.VITE_AUTH_ORIGIN as string | undefined) ?? 'https://auth.flaxia.app'
+).replace(/\/+$/, '');
 
-export const AUTH_ORIGIN = (viteEnv?.VITE_AUTH_ORIGIN ?? 'https://auth.flaxia.app').replace(/\/+$/, '');
+export const FLAXIA_SETTINGS_CONNECTIONS = 'https://flaxia.app/settings?category=connections';
 
 export class AuthApiError extends Error {
   readonly status: number;
@@ -88,9 +92,9 @@ const sha256Base64Url = async (value: string): Promise<string> => {
  *
  * The login UI expects an RP-shaped request (PKCE challenge + state), sets the
  * Auth session cookie, and returns a short-lived code to the callback. Studio
- * only needs the cookie for the Vault and connection APIs, so it verifies the
- * state and discards the code. Keeping the code PKCE-bound means nobody else
- * can redeem it.
+ * only needs the cookie for the connection list, so it verifies the state and
+ * discards the code. Keeping the code PKCE-bound means nobody else can
+ * redeem it.
  */
 export async function signIn(returnTo = `${window.location.origin}/auth/callback`): Promise<void> {
   const verifier = randomToken(32);
@@ -147,86 +151,4 @@ export interface ConnectionMetadata {
 export async function listConnections(): Promise<ConnectionMetadata[]> {
   const body = await authJson<{ connections: ConnectionMetadata[] }>('/api/connections');
   return body.connections;
-}
-
-export async function deleteConnection(provider: string): Promise<void> {
-  await authJson<{ success: true }>(`/api/connections/${encodeURIComponent(provider)}`, { method: 'DELETE' });
-}
-
-export interface SealedEnvelope {
-  ephemeralPublicKey: string;
-  iv: string;
-  ciphertext: string;
-}
-
-export interface OpenCodeOrg {
-  id: string;
-  name: string;
-}
-
-export interface DeviceAuthorization {
-  transaction_id: string;
-  device_code: string;
-  user_code: string;
-  verification_uri: string;
-  verification_uri_complete: string | null;
-  expires_in: number;
-  interval: number;
-}
-
-export type DevicePollResult =
-  | { status: 'pending' }
-  | { status: 'slow_down'; interval: number }
-  | { status: 'complete'; sealed: SealedEnvelope; orgs: OpenCodeOrg[] };
-
-/**
- * Pick the workspace bound to an org-scoped device grant. Auth's
- * `supports_org_scope` makes the Console return `org_id` with the token; that
- * org is authoritative. Returns null when the caller still needs to prompt.
- */
-export function selectGrantedOrg(
-  orgs: OpenCodeOrg[],
-  grantedOrgId: string | null | undefined,
-): OpenCodeOrg | null {
-  if (typeof grantedOrgId === 'string' && grantedOrgId.length > 0) {
-    return orgs.find((org) => org.id === grantedOrgId) ?? null;
-  }
-  return orgs.length === 1 ? (orgs[0] ?? null) : null;
-}
-
-export async function startOpenCodeDevice(state: string): Promise<DeviceAuthorization> {
-  return authJson<DeviceAuthorization>('/api/connections/opencode/device/start', {
-    method: 'POST',
-    body: JSON.stringify({ state }),
-  });
-}
-
-export async function pollOpenCodeDevice(input: {
-  transaction_id: string;
-  state: string;
-  device_code: string;
-  client_public_key: string;
-  interval: number;
-}): Promise<DevicePollResult> {
-  return authJson<DevicePollResult>('/api/connections/opencode/device/poll', {
-    method: 'POST',
-    body: JSON.stringify(input),
-  });
-}
-
-export async function completeConnection(
-  provider: string,
-  input: {
-    transaction_id: string;
-    state: string;
-    vault_item_id: string;
-    scopes: string[];
-    expires_at?: string | null;
-    refresh_expires_at?: string | null;
-  },
-): Promise<void> {
-  await authJson<{ success: true }>(`/api/connections/${encodeURIComponent(provider)}/complete`, {
-    method: 'POST',
-    body: JSON.stringify(input),
-  });
 }

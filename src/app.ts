@@ -2513,7 +2513,7 @@ export class App implements ShellHostish {
       },
       {
         id: 'connections.opencode',
-        label: 'Connections: Flaxia Account & OpenCode…',
+        label: 'Connections: Flaxia Account…',
         group: 'Connections',
         icon: 'flame',
         run: () => openConnections(),
