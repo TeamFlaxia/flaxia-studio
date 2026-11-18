@@ -48,6 +48,7 @@ import { LinuxRuntime, type LinuxStatus } from './linux/runtime';
 import { PlayHost, type PlayStatus, PlayStopped } from './play/host';
 import { isPlayPayloadPath, type PlayFile, type PlayPayload, validatePlayFiles } from './play/policy';
 import { StudioShell } from './terminal/shell';
+import { openConnections } from './ui/connections';
 import { showContextMenu } from './ui/context-menu';
 import { confirmDialog, openDialog, promptDialog } from './ui/dialog';
 import { InspectorView } from './ui/inspector';
@@ -2509,6 +2510,13 @@ export class App implements ShellHostish {
         group: 'View',
         icon: 'panel-right',
         run: () => this.setActiveView(this.activeView === 'play' ? 'editor' : 'play'),
+      },
+      {
+        id: 'connections.opencode',
+        label: 'Connections: Flaxia Account…',
+        group: 'Connections',
+        icon: 'flame',
+        run: () => openConnections(),
       },
       {
         id: 'view.settings',

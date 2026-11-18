@@ -2264,6 +2264,57 @@ button.status-item:hover {
   line-height: 1.5;
 }
 
+.connections {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.connection-heading {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.connections-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.connection-card {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+}
+
+.connection-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.connection-card-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.connection-card-meta {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.connection-status {
+  color: var(--accent-text);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+}
+
 .input,
 .select {
   width: 100%;
