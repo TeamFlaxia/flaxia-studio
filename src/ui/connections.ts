@@ -14,6 +14,7 @@ import {
   listConnections,
   type OpenCodeOrg,
   pollOpenCodeDevice,
+  selectGrantedOrg,
   signIn,
   startOpenCodeDevice,
 } from '../lib/auth';
@@ -221,6 +222,7 @@ export function openConnections(): void {
           state,
           device_code: start.device_code,
           client_public_key: publicKey,
+          interval: Math.max(1, Math.min(60, Math.round(intervalMs / 1000))),
         });
       } catch (error) {
         renderError(error, () => void connect());
@@ -262,9 +264,11 @@ export function openConnections(): void {
         token_type?: unknown;
         scope?: unknown;
         expires_in?: unknown;
+        org_id?: unknown;
       };
       if (typeof token.access_token !== 'string') throw new Error('OpenCode returned no access token.');
-      const org = await pickOrg(orgs);
+      const grantedOrgId = typeof token.org_id === 'string' && token.org_id.length > 0 ? token.org_id : null;
+      const org = await pickOrg(orgs, grantedOrgId);
       if (cancelled) return;
       const expiresIn =
         typeof token.expires_in === 'number' && Number.isFinite(token.expires_in) ? token.expires_in : 3600;
@@ -305,8 +309,12 @@ export function openConnections(): void {
     }
   };
 
-  const pickOrg = async (orgs: OpenCodeOrg[]): Promise<OpenCodeOrg | null> => {
-    if (orgs.length <= 1) return orgs[0] ?? null;
+  const pickOrg = async (orgs: OpenCodeOrg[], grantedOrgId: string | null): Promise<OpenCodeOrg | null> => {
+    // An org-scoped grant decides the workspace during Console approval, so
+    // do not offer a conflicting choice in Studio.
+    const granted = selectGrantedOrg(orgs, grantedOrgId);
+    if (granted) return granted;
+    if (orgs.length === 0) return null;
     return new Promise((resolve) => {
       const select = el(
         'select',

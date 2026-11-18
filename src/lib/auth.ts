@@ -179,6 +179,21 @@ export type DevicePollResult =
   | { status: 'slow_down'; interval: number }
   | { status: 'complete'; sealed: SealedEnvelope; orgs: OpenCodeOrg[] };
 
+/**
+ * Pick the workspace bound to an org-scoped device grant. Auth's
+ * `supports_org_scope` makes the Console return `org_id` with the token; that
+ * org is authoritative. Returns null when the caller still needs to prompt.
+ */
+export function selectGrantedOrg(
+  orgs: OpenCodeOrg[],
+  grantedOrgId: string | null | undefined,
+): OpenCodeOrg | null {
+  if (typeof grantedOrgId === 'string' && grantedOrgId.length > 0) {
+    return orgs.find((org) => org.id === grantedOrgId) ?? null;
+  }
+  return orgs.length === 1 ? (orgs[0] ?? null) : null;
+}
+
 export async function startOpenCodeDevice(state: string): Promise<DeviceAuthorization> {
   return authJson<DeviceAuthorization>('/api/connections/opencode/device/start', {
     method: 'POST',
@@ -191,6 +206,7 @@ export async function pollOpenCodeDevice(input: {
   state: string;
   device_code: string;
   client_public_key: string;
+  interval: number;
 }): Promise<DevicePollResult> {
   return authJson<DevicePollResult>('/api/connections/opencode/device/poll', {
     method: 'POST',
