@@ -12,7 +12,8 @@ import {
 } from './fs/path';
 import { createWorkspaceChannel } from './fs/sync-channel';
 import { ConflictError, Workspace, type WorkspaceEntry } from './fs/workspace';
-import { tryDecodeText } from './fs/zip';
+import { tryDecodeText, type ZipFile } from './fs/zip';
+import { buildArcadeZip } from './game/export';
 import { t } from './i18n/index.ts';
 import { copyText } from './lib/clipboard';
 import { el, formatBytes, iconButton } from './lib/dom';
@@ -694,6 +695,7 @@ export class App implements ShellHostish {
         iconButton('download', 'Import ZIP', () => this.importInput.click(), { size: 15 }),
         iconButton('file-image', 'Import media', () => this.mediaInput.click(), { size: 15 }),
         iconButton('upload', 'Export ZIP', () => void this.exportWorkspace(), { size: 15 }),
+        iconButton('package', 'Export for Arcade', () => void this.exportForArcade(), { size: 15 }),
         iconButton('refresh', 'Refresh', () => this.renderSidebar(), { size: 15 }),
       );
     } else if (this.sidebarView === 'linux') {
@@ -2151,6 +2153,42 @@ export class App implements ShellHostish {
     if (first) this.openFile(first);
   }
 
+  private async workspaceZipFiles(): Promise<ZipFile[]> {
+    const files: ZipFile[] = [];
+    for (const entry of this.workspace.list()) {
+      if (entry.type !== 'file') continue;
+      if (!entry.binary) {
+        files.push({ path: entry.path, type: 'text', text: entry.content });
+        continue;
+      }
+      const blob = await this.workspace.readBlob(entry.path);
+      if (blob)
+        files.push({ path: entry.path, type: 'binary', bytes: new Uint8Array(await blob.arrayBuffer()) });
+    }
+    return files;
+  }
+
+  /** Exports only Arcade-eligible files, leaving project files behind. */
+  async exportForArcade(): Promise<void> {
+    try {
+      const result = buildArcadeZip(await this.workspaceZipFiles());
+      const blob = new Blob([result.bytes.slice().buffer], { type: 'application/zip' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${this.workspace.name || 'flaxia-studio'}-arcade.zip`;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      this.log(
+        `Arcade export: ${result.included.length} file(s), entry ${result.entry}, ` +
+          `${result.excluded.length} excluded (${result.excluded.map((item) => item.path).join(', ')})`,
+      );
+      toast('Export started', anchor.download, 'success', 2000);
+    } catch (error) {
+      toast('Arcade export failed', error instanceof Error ? error.message : String(error), 'error');
+    }
+  }
+
   async exportWorkspace(): Promise<void> {
     try {
       const bytes = await this.workspace.exportZip();
@@ -2729,6 +2767,13 @@ export class App implements ShellHostish {
         group: 'Workspace',
         icon: 'plus',
         run: () => void this.createWorkspace(),
+      },
+      {
+        id: 'workspace.export-arcade',
+        label: `Workspace: ${t('command.exportForArcade')}`,
+        group: 'Workspace',
+        icon: 'upload',
+        run: () => void this.exportForArcade(),
       },
       {
         id: 'workspace.rename',
