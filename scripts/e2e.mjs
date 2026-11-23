@@ -26,6 +26,11 @@ function check(label, condition, detail) {
   console.log(`ok - ${label}`);
 }
 
+/** Monaco renders spaces as NBSP in `innerText`; normalise before comparing. */
+function normalise(text) {
+  return String(text).replace(/\u00a0/g, ' ');
+}
+
 const browser = await chromium.launch({ headless: true });
 try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, acceptDownloads: true });
@@ -69,13 +74,15 @@ try {
   await page.waitForTimeout(900);
 
   // Unified undo/redo: Monaco text edits are part of the app history.
+  let editorText = normalise(await page.locator('.monaco-editor .view-lines').innerText());
+  check('typed text present before undo', editorText.includes('answer = 42'), editorText);
   await page.keyboard.press('Control+KeyZ');
   await page.waitForTimeout(250);
-  let editorText = await page.locator('.monaco-editor .view-lines').innerText();
+  editorText = normalise(await page.locator('.monaco-editor .view-lines').innerText());
   check('undo removes typed text', !editorText.includes('answer = 42'), editorText);
   await page.keyboard.press('Control+Shift+KeyZ');
   await page.waitForTimeout(250);
-  editorText = await page.locator('.monaco-editor .view-lines').innerText();
+  editorText = normalise(await page.locator('.monaco-editor .view-lines').innerText());
   check('redo restores typed text', editorText.includes('answer = 42'), editorText);
 
   // New folder + rename
@@ -194,7 +201,16 @@ try {
     .catch(() => 'unavailable');
   check('game entry rendered', h1.length > 0, h1);
 
-  // Arcade compatibility check reports into Problems
+  // Arcade compatibility check reports into Problems. Add a file that uses an
+  // opaque-origin API so there is a deterministic warning to find.
+  await page.locator('button[aria-label="New file"]').first().click();
+  await page.locator('.dialog .input').fill('risky.js');
+  await page.locator('.dialog .btn-primary').click();
+  await page.waitForTimeout(300);
+  await page.locator('.monaco-editor .view-lines').click();
+  await page.keyboard.type("localStorage.setItem('a', '1');");
+  await page.waitForTimeout(900);
+
   await page.keyboard.press('Control+KeyK');
   await page.locator('.cmd-input').fill('Check compatibility');
   await page.keyboard.press('Enter');
@@ -226,16 +242,27 @@ try {
   check('theme persisted', (await page.evaluate(() => document.documentElement.dataset.theme)) === 'dark');
   await page.screenshot({ path: '/tmp/studio-e2e.png' });
 
-  // Delete file
-  await page.keyboard.press('Control+KeyK');
+  // Delete file (select it explicitly so the command acts on the right path)
+  await page.locator('.tree-row', { hasText: 'e2e.ts' }).click();
+  await page.waitForTimeout(200);
+  await page.locator('.command-trigger').click();
+  check('command palette open', (await page.locator('.cmd-input').count()) === 1);
   await page.locator('.cmd-input').fill('delete');
+  const deleteItems = await page.locator('.cmd-item').allInnerTexts();
   await page.keyboard.press('Enter');
   await page.waitForTimeout(300);
+  check(
+    'delete command matched',
+    deleteItems.some((item) => item.includes('Delete')),
+    deleteItems.join('|'),
+  );
+  check('delete confirmation shown', (await page.locator('.dialog .btn-danger').count()) === 1);
   if (await page.locator('.dialog .btn-danger').count()) {
     await page.locator('.dialog .btn-danger').click();
     await page.waitForTimeout(400);
   }
-  check('file deleted', !(await page.locator('.tree-row').allInnerTexts()).includes('e2e.ts'));
+  const rowsAfterDelete = await page.locator('.tree-row').allInnerTexts();
+  check('file deleted', !rowsAfterDelete.includes('e2e.ts'), rowsAfterDelete.join('|'));
 
   assert.deepEqual(errors, [], `Browser errors:\n${errors.join('\n')}`);
   console.log('ok - no browser console/page errors');

@@ -1537,7 +1537,7 @@ export class App implements ShellHostish {
     this.editor.close(path);
     // The model's Monaco undo stack is disposed with it; drop its tokens so a
     // later Ctrl+Z cannot consume a step that can no longer be replayed.
-    await this.history.removeByKey(`text:${path}`);
+    this.history.removeByKey(`text:${path}`);
     const index = this.openTabs.indexOf(path);
     if (index >= 0) this.openTabs.splice(index, 1);
     if (this.activePath === path) {

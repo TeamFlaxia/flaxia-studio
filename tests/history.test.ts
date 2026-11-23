@@ -137,7 +137,7 @@ test('removeByKey drops only matching steps', async () => {
   text.execute();
   await history.push(text);
   await history.run({ ...valueCommand(value, 'b'), id: 'other' });
-  await history.removeByKey('text:a');
+  history.removeByKey('text:a');
   assert.equal(history.state.depth, 1);
   await history.undo();
   assert.equal(value.current, 'a');

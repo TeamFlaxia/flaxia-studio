@@ -109,14 +109,16 @@ export class HistoryService {
     });
   }
 
-  /** Removes all steps with a merge key, e.g. when a file's models are closed. */
-  async removeByKey(key: string): Promise<void> {
-    return this.enqueue(() => {
-      this.undoStack = this.undoStack.filter((command) => command.mergeKey !== key);
-      this.redoStack = this.redoStack.filter((command) => command.mergeKey !== key);
-      this.lastMerge = null;
-      this.emit();
-    });
+  /**
+   * Removes all steps with a merge key, e.g. when a file's models are closed.
+   * Synchronous on purpose: a command's `execute`/`undo` may call this while
+   * the history queue is already busy, and enqueueing here would deadlock.
+   */
+  removeByKey(key: string): void {
+    this.undoStack = this.undoStack.filter((command) => command.mergeKey !== key);
+    this.redoStack = this.redoStack.filter((command) => command.mergeKey !== key);
+    this.lastMerge = null;
+    this.emit();
   }
 
   /** Clears both stacks, e.g. when switching workspaces. */
