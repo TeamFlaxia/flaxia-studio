@@ -4,6 +4,7 @@ import {
   deleteBlobs,
   deleteFiles,
   type FileRecord,
+  getActiveWorkspaceId,
   getBlob,
   getWorkspace,
   listFiles,
@@ -11,6 +12,7 @@ import {
   putBlob,
   putFiles,
   putWorkspace,
+  setActiveWorkspaceId,
   type WorkspaceRecord,
 } from './indexeddb.ts';
 import { isPathInside, joinPath, normalizePath, stem, uniquePath } from './path.ts';
@@ -27,6 +29,8 @@ export interface WorkspaceEntry {
   size?: number;
   mime?: string;
   updatedAt: number;
+  /** Incremented whenever this entry is overwritten; 1 for a new entry. */
+  version: number;
 }
 
 const DEFAULT_WORKSPACE_NAME = 'flaxia-studio';
@@ -39,26 +43,59 @@ function toBlobPart(bytes: Uint8Array): ArrayBuffer {
   return bytes.slice().buffer as ArrayBuffer;
 }
 
+/** Thrown when a write carries a stale per-file version (optimistic lock). */
+export class ConflictError extends Error {
+  readonly path: string;
+  readonly expected: number;
+  readonly actual: number;
+
+  constructor(path: string, expected: number, actual: number) {
+    super(`"${path}" changed: expected version ${expected}, found ${actual}.`);
+    this.name = 'ConflictError';
+    this.path = path;
+    this.expected = expected;
+    this.actual = actual;
+  }
+}
+
 export class Workspace {
   readonly id: string;
   name: string;
   readonly createdAt: number;
   updatedAt: number;
+  /** Monotonic revision of the workspace record (cross-tab change signal). */
+  rev: number;
   private entries = new Map<string, WorkspaceEntry>();
+  private changeNotifier: ((rev: number) => void) | null = null;
 
   private constructor(record: WorkspaceRecord) {
     this.id = record.id;
     this.name = record.name;
     this.createdAt = record.createdAt;
     this.updatedAt = record.updatedAt;
+    this.rev = record.rev ?? 1;
   }
 
   static async openDefault(): Promise<Workspace> {
-    const records = await listWorkspaces();
-    const record = records.sort((a, b) => a.createdAt - b.createdAt)[0] ?? (await createRecord());
+    const [activeId, records] = await Promise.all([getActiveWorkspaceId(), listWorkspaces()]);
+    // A stale/missing active id falls back to the most recently touched record.
+    const record =
+      (activeId ? records.find((item) => item.id === activeId) : undefined) ??
+      [...records].sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    if (!record) return Workspace.create();
     const workspace = new Workspace(record);
     await workspace.hydrate();
-    if (workspace.entries.size === 0) await workspace.seed();
+    // An existing record with no files is legitimate — never re-seed it.
+    await setActiveWorkspaceId(workspace.id);
+    return workspace;
+  }
+
+  /** Creates a fresh workspace record, seeds it, and makes it active. */
+  static async create(name?: string): Promise<Workspace> {
+    const record = await createRecord(name);
+    const workspace = new Workspace(record);
+    await workspace.seed();
+    await setActiveWorkspaceId(workspace.id);
     return workspace;
   }
 
@@ -67,6 +104,8 @@ export class Workspace {
     if (!record) return null;
     const workspace = new Workspace(record);
     await workspace.hydrate();
+    // Switching records also makes the opened one the default for next launch.
+    await setActiveWorkspaceId(workspace.id);
     return workspace;
   }
 
@@ -82,6 +121,7 @@ export class Workspace {
         size: record.size,
         mime: record.mime,
         updatedAt: record.updatedAt,
+        version: record.version ?? 1,
       });
     }
   }
@@ -99,11 +139,11 @@ export class Workspace {
   }
 
   private fileEntry(path: string, content: string): WorkspaceEntry {
-    return { path, type: 'file', content, binary: false, updatedAt: Date.now() };
+    return { path, type: 'file', content, binary: false, version: 1, updatedAt: Date.now() };
   }
 
   private dirEntry(path: string): WorkspaceEntry {
-    return { path, type: 'dir', content: '', updatedAt: Date.now() };
+    return { path, type: 'dir', content: '', version: 1, updatedAt: Date.now() };
   }
 
   private toRecord(entry: WorkspaceEntry): FileRecord {
@@ -118,6 +158,7 @@ export class Workspace {
       size: entry.size,
       mime: entry.mime,
       updatedAt: entry.updatedAt,
+      version: entry.version ?? 1,
     };
   }
 
@@ -132,12 +173,20 @@ export class Workspace {
 
   private async touch(): Promise<void> {
     this.updatedAt = Date.now();
+    this.rev += 1;
     await putWorkspace({
       id: this.id,
       name: this.name,
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,
+      rev: this.rev,
     });
+    this.changeNotifier?.(this.rev);
+  }
+
+  /** Called by the app to broadcast revisions to other tabs. */
+  setChangeNotifier(notifier: ((rev: number) => void) | null): void {
+    this.changeNotifier = notifier;
   }
 
   list(): WorkspaceEntry[] {
@@ -156,6 +205,30 @@ export class Workspace {
 
   get(path: string): WorkspaceEntry | undefined {
     return this.entries.get(path);
+  }
+
+  /** Current file version for optimistic locking; 0 when the path is absent. */
+  versionOf(path: string): number {
+    return this.entries.get(normalizePath(path))?.version ?? 0;
+  }
+
+  /** Authoritative persisted version, used to catch writes from other tabs. */
+  private async storedVersionOf(path: string): Promise<number> {
+    const records = await listFiles(this.id);
+    return records.find((record) => record.path === path)?.version ?? 0;
+  }
+
+  /** Resolves the version a write must supersede, enforcing a lock if given. */
+  private async versionForWrite(path: string, expectedVersion?: number): Promise<number> {
+    const local = this.versionOf(path);
+    if (expectedVersion !== undefined && local !== expectedVersion) {
+      throw new ConflictError(path, expectedVersion, local);
+    }
+    const stored = await this.storedVersionOf(path);
+    if (expectedVersion !== undefined && stored !== expectedVersion) {
+      throw new ConflictError(path, expectedVersion, stored);
+    }
+    return Math.max(local, stored);
   }
 
   readFile(path: string): string | null {
@@ -206,9 +279,10 @@ export class Workspace {
     return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
   }
 
-  async writeFile(path: string, content: string): Promise<void> {
+  async writeFile(path: string, content: string, expectedVersion?: number): Promise<void> {
     const normalized = normalizePath(path);
     if (!normalized) throw new Error('Cannot write to the workspace root.');
+    const actual = await this.versionForWrite(normalized, expectedVersion);
     await this.ensureParents(normalized);
     const previous = this.entries.get(normalized)?.blobId;
     const entry: WorkspaceEntry = {
@@ -216,6 +290,7 @@ export class Workspace {
       type: 'file',
       content,
       binary: false,
+      version: actual + 1,
       updatedAt: Date.now(),
     };
     this.entries.set(normalized, entry);
@@ -228,9 +303,15 @@ export class Workspace {
    *
    * Returns the normalized path so callers can open the file right away.
    */
-  async writeBinaryFile(path: string, data: Uint8Array | Blob, mime?: string): Promise<string> {
+  async writeBinaryFile(
+    path: string,
+    data: Uint8Array | Blob,
+    mime?: string,
+    expectedVersion?: number,
+  ): Promise<string> {
     const normalized = normalizePath(path);
     if (!normalized) throw new Error('Cannot write to the workspace root.');
+    const actual = await this.versionForWrite(normalized, expectedVersion);
     const blob = data instanceof Blob ? data : new Blob([toBlobPart(data)], { type: mime ?? '' });
     if (blob.size > MAX_BINARY_BYTES) {
       throw new Error(`${normalized} is larger than the 2 GB file limit.`);
@@ -247,6 +328,7 @@ export class Workspace {
       blobId,
       size: blob.size,
       mime: mime ?? (blob.type || undefined),
+      version: actual + 1,
       updatedAt: Date.now(),
     };
     this.entries.set(normalized, entry);
@@ -313,7 +395,15 @@ export class Workspace {
       if (!isPathInside(key, source)) continue;
       const suffix = key.slice(source.length);
       const nextPath = normalizePath(`${target}${suffix}`);
-      moving.push({ oldPath: key, entry: { ...entry, path: nextPath, updatedAt: Date.now() } });
+      moving.push({
+        oldPath: key,
+        entry: {
+          ...entry,
+          path: nextPath,
+          version: (entry.version ?? 1) + 1,
+          updatedAt: Date.now(),
+        },
+      });
     }
     if (moving.length === 0) throw new Error(`"${source}" does not exist.`);
 
@@ -347,6 +437,7 @@ export class Workspace {
           type: 'file',
           content: file.text,
           binary: false,
+          version: 1,
           updatedAt: now,
         };
         this.entries.set(normalized, entry);
@@ -364,6 +455,7 @@ export class Workspace {
         binary: true,
         blobId,
         size: blob.size,
+        version: 1,
         updatedAt: now,
       };
       this.entries.set(normalized, entry);
@@ -429,13 +521,14 @@ function compareEntries(a: WorkspaceEntry, b: WorkspaceEntry): number {
   return a.path.localeCompare(b.path, 'en', { numeric: true });
 }
 
-async function createRecord(): Promise<WorkspaceRecord> {
+async function createRecord(name = DEFAULT_WORKSPACE_NAME): Promise<WorkspaceRecord> {
   const now = Date.now();
   const record: WorkspaceRecord = {
     id: randomId(),
-    name: DEFAULT_WORKSPACE_NAME,
+    name,
     createdAt: now,
     updatedAt: now,
+    rev: 1,
   };
   await putWorkspace(record);
   return record;
