@@ -130,6 +130,19 @@ test('a failed execute is not recorded', async () => {
   assert.equal(history.state.depth, 0);
 });
 
+test('removeByKey drops only matching steps', async () => {
+  const value = { current: '' };
+  const history = new HistoryService();
+  const text = { ...valueCommand(value, 'a'), mergeKey: 'text:a' };
+  text.execute();
+  await history.push(text);
+  await history.run({ ...valueCommand(value, 'b'), id: 'other' });
+  await history.removeByKey('text:a');
+  assert.equal(history.state.depth, 1);
+  await history.undo();
+  assert.equal(value.current, 'a');
+});
+
 test('push records an already executed command', async () => {
   const value = { current: 'a' };
   const history = new HistoryService();

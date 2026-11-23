@@ -193,7 +193,10 @@ export class EditorManager {
 
   private async replaySteps(path: string, steps: number, direction: 'undo' | 'redo'): Promise<void> {
     const model = this.models.get(path);
-    if (!model) return;
+    if (!model) {
+      this.callbacks?.onChange(path, 'history');
+      return;
+    }
     this.suppressChange = true;
     try {
       for (let index = 0; index < steps; index += 1) {
@@ -203,8 +206,8 @@ export class EditorManager {
       }
     } finally {
       this.suppressChange = false;
+      this.callbacks?.onChange(path, 'history');
     }
-    this.callbacks?.onChange(path, 'history');
   }
 
   markSaved(path: string): void {
