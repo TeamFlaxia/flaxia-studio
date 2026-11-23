@@ -25,6 +25,7 @@
 (() => {
   const PLACEHOLDER = /blob:flaxia-play\/([^"'()\s]+)/g;
   const ARCHIVE_ORIGIN = 'https://zip.invalid/';
+  const MAX_CONSOLE_MESSAGE = 500;
 
   let files = new Map();
   let texts = {};
@@ -130,6 +131,72 @@
       }
       return original(input, init);
     };
+  };
+
+  const formatConsoleArg = (value) => {
+    if (typeof value === 'string') return value;
+    if (value instanceof Error) return value.stack || value.message;
+    if (typeof value === 'undefined') return 'undefined';
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  };
+
+  /**
+   * Bridges the game's console and uncaught errors to the studio Output panel.
+   *
+   * The game frame has an opaque origin, so the browser devtools cannot always
+   * reach it. Installing these listeners before the entry document is written
+   * means game scripts are covered from their first line.
+   */
+  const installDiagnostics = () => {
+    const relay = (level, message, source, line, column) => {
+      const entry = { level, message: String(message).slice(0, MAX_CONSOLE_MESSAGE) };
+      if (source) entry.source = String(source).slice(0, 255);
+      if (Number.isFinite(line) && line > 0) entry.line = line;
+      if (Number.isFinite(column) && column > 0) entry.column = column;
+      try {
+        window.parent.postMessage({ type: 'play:runtime-console', entry }, '*');
+      } catch {
+        // The frame may already be detached.
+      }
+    };
+
+    window.addEventListener(
+      'error',
+      (event) => {
+        if (event.message) {
+          relay('error', event.message, event.filename, event.lineno, event.colno);
+          return;
+        }
+        const target = event.target;
+        if (target && target !== window) {
+          const url = target.src || target.href || 'resource';
+          relay('error', `Failed to load ${url}`, url);
+        }
+      },
+      true,
+    );
+
+    window.addEventListener('unhandledrejection', (event) => {
+      const reason = event.reason;
+      relay('error', reason?.message ? reason.message : String(reason));
+    });
+
+    for (const level of ['log', 'info', 'warn', 'error']) {
+      const original = console[level];
+      if (typeof original !== 'function') continue;
+      console[level] = (...args) => {
+        try {
+          relay(level, args.map(formatConsoleArg).join(' '));
+        } catch {
+          // Never break the game because diagnostics failed.
+        }
+        original.apply(console, args);
+      };
+    }
   };
 
   /** Relays a storage write to the studio through the shell. */
@@ -278,5 +345,6 @@
 
   window.addEventListener('pagehide', () => revokeBlobs());
 
+  installDiagnostics();
   window.parent.postMessage({ type: 'play:runtime-ready' }, '*');
 })();

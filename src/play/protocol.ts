@@ -20,6 +20,21 @@ const MAX_ERROR_LENGTH = 500;
 /** Sent by a game inside the sandboxed iframe to request fullscreen. */
 export const PLAY_FULLSCREEN_REQUEST = 'REQUEST_FULLSCREEN';
 
+/** Console level relayed from the sandboxed game to the studio Output panel. */
+export type PlayConsoleLevel = 'log' | 'info' | 'warn' | 'error';
+
+export interface PlayConsoleEntry {
+  level: PlayConsoleLevel;
+  message: string;
+  /** Payload-relative script path when known. */
+  source?: string;
+  line?: number;
+  column?: number;
+}
+
+const CONSOLE_LEVELS = new Set<string>(['log', 'info', 'warn', 'error']);
+const MAX_CONSOLE_SOURCE_LENGTH = 255;
+
 export type PlayHostMessage =
   | { type: 'play:init'; requestId: string }
   | {
@@ -43,7 +58,8 @@ export type PlayShellMessage =
       operation: PlayStorageOperation;
       key?: string;
       value?: string;
-    };
+    }
+  | { type: 'play:console'; entry: PlayConsoleEntry };
 
 export interface PlayRuntimeFile {
   path: string;
@@ -69,7 +85,8 @@ export type PlayRuntimeMessage =
       operation: PlayStorageOperation;
       key?: string;
       value?: string;
-    };
+    }
+  | { type: 'play:runtime-console'; entry: PlayConsoleEntry };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -97,6 +114,19 @@ function isStorageSnapshot(value: unknown): value is Record<string, string> {
     size += key.length + entry.length;
     if (size > PLAY_STORAGE_MAX_BYTES) return false;
   }
+  return true;
+}
+
+function isConsoleEntry(value: unknown): value is PlayConsoleEntry {
+  if (!isRecord(value)) return false;
+  if (typeof value.level !== 'string' || !CONSOLE_LEVELS.has(value.level)) return false;
+  if (typeof value.message !== 'string' || value.message.length > MAX_ERROR_LENGTH) return false;
+  if (value.source !== undefined) {
+    if (typeof value.source !== 'string' || value.source.length > MAX_CONSOLE_SOURCE_LENGTH) return false;
+  }
+  if (value.line !== undefined && (!Number.isInteger(value.line) || (value.line as number) < 0)) return false;
+  if (value.column !== undefined && (!Number.isInteger(value.column) || (value.column as number) < 0))
+    return false;
   return true;
 }
 
@@ -140,6 +170,7 @@ export function isPlayShellMessage(value: unknown): value is PlayShellMessage {
   if (value.type === 'play:init-ack') return isRequestId(value.requestId);
   if (value.type === 'play:stopped') return isRequestId(value.requestId);
   if (value.type === 'play:storage-write') return isStorageWrite(value);
+  if (value.type === 'play:console') return isConsoleEntry(value.entry);
   if (value.type === 'play:result') {
     if (!isRequestId(value.requestId) || typeof value.ok !== 'boolean') return false;
     return (
@@ -154,6 +185,7 @@ export function isPlayRuntimeMessage(value: unknown): value is PlayRuntimeMessag
   if (value.type === 'play:runtime-ready') return true;
   if (value.type === 'play:runtime-started') return true;
   if (value.type === 'play:storage-write') return isStorageWrite(value);
+  if (value.type === 'play:runtime-console') return isConsoleEntry(value.entry);
   if (value.type === 'play:runtime-error') {
     return typeof value.error === 'string' && value.error.length <= MAX_ERROR_LENGTH;
   }

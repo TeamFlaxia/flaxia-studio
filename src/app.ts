@@ -1,5 +1,6 @@
 import { EditorManager, installMonacoShadowStyles } from './editor/monaco';
 import { base64ToBytes } from './fs/base64';
+import { listWorkspaces } from './fs/indexeddb';
 import {
   basename,
   dirname,
@@ -9,11 +10,13 @@ import {
   normalizePath,
   uniquePath,
 } from './fs/path';
-import type { WorkspaceEntry } from './fs/workspace';
-import { Workspace } from './fs/workspace';
+import { createWorkspaceChannel } from './fs/sync-channel';
+import { ConflictError, Workspace, type WorkspaceEntry } from './fs/workspace';
 import { tryDecodeText } from './fs/zip';
+import { t } from './i18n/index.ts';
 import { copyText } from './lib/clipboard';
 import { el, formatBytes, iconButton } from './lib/dom';
+import { type Command, HistoryService } from './lib/history';
 import { fileIcon, type IconName, icon } from './lib/icons';
 import {
   applyLayoutSizes,
@@ -46,7 +49,15 @@ import {
 } from './lib/timeline';
 import { LinuxRuntime, type LinuxStatus } from './linux/runtime';
 import { PlayHost, type PlayStatus, PlayStopped } from './play/host';
-import { isPlayPayloadPath, type PlayFile, type PlayPayload, validatePlayFiles } from './play/policy';
+import {
+  type CompatibilityIssue,
+  checkArcadeCompatibility,
+  isPlayPayloadPath,
+  type PlayFile,
+  type PlayPayload,
+  validatePlayFiles,
+} from './play/policy';
+import type { PlayConsoleEntry } from './play/protocol';
 import { StudioShell } from './terminal/shell';
 import { showContextMenu } from './ui/context-menu';
 import { confirmDialog, openDialog, promptDialog } from './ui/dialog';
@@ -65,6 +76,19 @@ interface SearchResult {
   path: string;
   line: number;
   text: string;
+}
+
+interface Diagnostic {
+  code: string;
+  severity: 'error' | 'warning' | 'info';
+  message: string;
+  path?: string;
+  line?: number;
+  column?: number;
+}
+
+interface TextHistoryCommand extends Command {
+  steps: number;
 }
 
 interface TreeNode {
@@ -143,6 +167,11 @@ export class App implements ShellHostish {
   private cursor = { line: 1, column: 1, selected: 0 };
   private outputLines: Array<{ time: string; message: string }> = [];
   private saveTimers = new Map<string, number>();
+  private readonly fileVersions = new Map<string, number>();
+  private workspaceChannel: ReturnType<typeof createWorkspaceChannel> | null = null;
+  private staleWorkspaceNotified = false;
+  private readonly history = new HistoryService();
+  private diagnostics: Diagnostic[] = [];
   private warnedApkCors = false;
   private lastLinuxStatus: LinuxStatus;
   private linuxUnsubscribe: (() => void) | null = null;
@@ -155,6 +184,10 @@ export class App implements ShellHostish {
 
   constructor(workspace: Workspace) {
     this.workspace = workspace;
+    this.workspace.setChangeNotifier((rev) => {
+      this.workspaceChannel?.postChange(this.workspace.id, rev);
+      this.staleWorkspaceNotified = false;
+    });
     this.settings = loadSettings();
     this.panelView = this.settings.defaultBottomTab;
     this.lastLinuxStatus = this.linux.status();
@@ -164,6 +197,7 @@ export class App implements ShellHostish {
     this.playHost = new PlayHost(
       (status, detail) => this.handlePlayStatus(status, detail),
       this.workspace.id,
+      (entry) => this.handlePlayConsole(entry),
     );
     this.timelineStore = new TimelineStore(this.workspace, () => this.handleTimelineChange());
     this.mediaView = new MediaView({
@@ -230,7 +264,7 @@ export class App implements ShellHostish {
     this.buildShell();
     installMonacoShadowStyles();
     this.editor.init({
-      onChange: (path) => this.handleEditorChange(path),
+      onChange: (path, origin) => this.handleEditorChange(path, origin),
       onCursor: (position) => {
         this.cursor = position;
         this.renderStatus();
@@ -251,6 +285,24 @@ export class App implements ShellHostish {
     this.shell.mount();
     this.shell.setTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
     this.linuxUnsubscribe = this.linux.subscribe((status) => this.handleLinuxStatus(status));
+    this.workspaceChannel = createWorkspaceChannel((message) => {
+      if (message.workspaceId !== this.workspace.id || message.rev <= this.workspace.rev) return;
+      if (this.staleWorkspaceNotified) return;
+      this.staleWorkspaceNotified = true;
+      this.log(t('workspace.otherTabChanged'));
+      void openDialog({
+        title: t('workspace.conflictTitle'),
+        body: t('workspace.otherTabChanged'),
+        width: 420,
+        centered: true,
+        actions: [
+          { label: t('common.cancel'), value: 'cancel' },
+          { label: 'Reload', value: 'reload', primary: true },
+        ],
+      }).then((value) => {
+        if (value === 'reload') window.location.reload();
+      });
+    });
     this.bindKeys();
     window.addEventListener('flaxia:theme', () => {
       const resolved = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
@@ -259,7 +311,13 @@ export class App implements ShellHostish {
       this.renderTopbarTheme(this.themeButton);
     });
     window.addEventListener('resize', () => this.layout());
+    window.addEventListener('beforeunload', (event) => {
+      if (this.openTabs.some((path) => this.editor.isDirty(path))) event.preventDefault();
+    });
     window.addEventListener('pagehide', () => {
+      this.flushSaves();
+      this.workspaceChannel?.close();
+      this.workspace.setChangeNotifier(null);
       this.timeline.dispose();
       this.previewView.dispose();
       void this.timelineStore.flush();
@@ -441,8 +499,8 @@ export class App implements ShellHostish {
       {
         class: 'workspace-chip',
         type: 'button',
-        title: 'Rename workspace',
-        on: { click: () => void this.renameWorkspace() },
+        title: t('workspace.switch'),
+        on: { click: () => void this.openWorkspaceSwitcher() },
       },
       [icon('hard-drive', 14), el('span', { class: 'workspace-name', text: this.workspace.name })],
     );
@@ -1208,6 +1266,7 @@ export class App implements ShellHostish {
     this.editor.show(true);
     this.welcome.classList.add('hidden');
     this.editor.open(path, content, languageForPath(path));
+    this.fileVersions.set(path, this.workspace.versionOf(path));
     if (line) window.setTimeout(() => this.editor.revealLine(path, line), 30);
     if (window.matchMedia?.('(max-width: 720px)').matches) this.sidebarVisible = false;
     this.setActiveView('editor');
@@ -1488,8 +1547,14 @@ export class App implements ShellHostish {
     this.openFile(keep);
   }
 
-  private handleEditorChange(path: string): void {
+  private handleEditorChange(path: string, origin: 'user' | 'history' = 'user'): void {
     this.renderTabs();
+    if (origin === 'user') {
+      // One Monaco undo stop per change; the app history groups consecutive
+      // changes into a single undo step via `mergeKey`.
+      this.editor.pushUndoStop(path);
+      void this.history.push(this.createTextCommand(path, 1));
+    }
     if (!this.settings.autoSave) return;
     const existing = this.saveTimers.get(path);
     if (existing) window.clearTimeout(existing);
@@ -1502,10 +1567,73 @@ export class App implements ShellHostish {
     );
   }
 
-  private async saveFile(path: string, quiet = false): Promise<void> {
+  private createTextCommand(path: string, steps: number): TextHistoryCommand {
+    const editor = this.editor;
+    return {
+      id: `text:${path}`,
+      label: 'Edit text',
+      mergeKey: `text:${path}`,
+      steps,
+      // The edit already happened; undo/redo replay Monaco's own undo stops.
+      execute: () => undefined,
+      undo: () => editor.undoSteps(path, steps),
+      redo: () => editor.redoSteps(path, steps),
+      merge: (later) => this.createTextCommand(path, steps + (later as TextHistoryCommand).steps),
+    };
+  }
+
+  private async undo(): Promise<void> {
+    await this.history.undo();
+    this.renderStatus();
+  }
+
+  private async redo(): Promise<void> {
+    await this.history.redo();
+    this.renderStatus();
+  }
+
+  /** Flushes pending autosaves before the page unloads. */
+  private flushSaves(): void {
+    for (const [path, timer] of this.saveTimers) {
+      window.clearTimeout(timer);
+      void this.saveFile(path, true);
+    }
+    this.saveTimers.clear();
+  }
+
+  private async saveFile(path: string, quiet = false, force = false): Promise<void> {
     const value = this.editor.getValue(path);
     if (value === null) return;
-    await this.workspace.writeFile(path, value);
+    const expected = force ? undefined : this.fileVersions.get(path);
+    try {
+      await this.workspace.writeFile(path, value, expected);
+    } catch (error) {
+      if (!(error instanceof ConflictError)) throw error;
+      const choice = await openDialog({
+        title: t('workspace.conflictTitle'),
+        body: `${path}\n${t('workspace.otherTabChanged')}`,
+        width: 440,
+        centered: true,
+        actions: [
+          { label: t('common.cancel'), value: 'cancel' },
+          { label: t('workspace.conflictTheirs'), value: 'theirs' },
+          { label: t('workspace.conflictMine'), value: 'mine', primary: true },
+        ],
+      });
+      if (choice === 'mine') {
+        await this.saveFile(path, quiet, true);
+        return;
+      }
+      if (choice === 'theirs') {
+        const stored = this.workspace.readFile(path);
+        if (stored !== null) this.editor.setValue(path, stored);
+        this.fileVersions.set(path, this.workspace.versionOf(path));
+        this.editor.markSaved(path);
+        this.renderTabs();
+      }
+      return;
+    }
+    this.fileVersions.set(path, this.workspace.versionOf(path));
     this.editor.markSaved(path);
     this.renderTabs();
     this.schedulePlayReload();
@@ -1521,6 +1649,104 @@ export class App implements ShellHostish {
     }
     this.log('Saved all open files.');
     toast('Saved all', `${this.openTabs.length} open file(s)`, 'success', 1600);
+  }
+
+  // ------------------------------------------------------------
+  // Diagnostics
+  // ------------------------------------------------------------
+  private setCompatibilityDiagnostics(issues: readonly CompatibilityIssue[]): void {
+    this.diagnostics = issues.map((issue) => ({
+      code: `${issue.scope}:${issue.code}`,
+      severity: issue.severity,
+      message: issue.message,
+      path: issue.path ?? undefined,
+    }));
+    this.renderProblems();
+  }
+
+  private handlePlayConsole(entry: PlayConsoleEntry): void {
+    const location = entry.source
+      ? ` ${entry.source}${entry.line ? `:${entry.line}${entry.column ? `:${entry.column}` : ''}` : ''}`
+      : '';
+    this.log(`Test Play [${entry.level}]${location} ${entry.message}`);
+    if (entry.level !== 'error' && entry.level !== 'warn') return;
+    const code = `play:${entry.level}`;
+    if (
+      this.diagnostics.some(
+        (item) => item.code === code && item.message === entry.message && item.path === entry.source,
+      )
+    ) {
+      return;
+    }
+    this.diagnostics.push({
+      code,
+      severity: entry.level === 'error' ? 'error' : 'warning',
+      message: entry.message,
+      path: entry.source,
+      line: entry.line,
+      column: entry.column,
+    });
+    this.renderProblems();
+  }
+
+  private renderProblems(): void {
+    this.problemsView.replaceChildren();
+    if (this.diagnostics.length === 0) {
+      this.problemsView.appendChild(
+        el('div', { class: 'terminal-note' }, [
+          icon('check', 15),
+          'No problems have been detected in the workspace.',
+        ]),
+      );
+      return;
+    }
+    const list = el('div', { class: 'problems-list' });
+    for (const item of this.diagnostics) {
+      const location = item.path
+        ? `${item.path}${item.line ? `:${item.line}${item.column ? `:${item.column}` : ''}` : ''}`
+        : '';
+      const row = el('button', {
+        class: 'problems-row',
+        type: 'button',
+        title: item.code,
+        on: {
+          click: () => {
+            if (!item.path || !this.editor.hasModel(item.path)) return;
+            this.editor.revealLine(item.path, item.line ?? 1, item.column ?? 1);
+          },
+        },
+      });
+      row.append(
+        el('span', { class: `problems-severity is-${item.severity}`, text: item.severity }),
+        el('span', { class: 'problems-message', text: item.message }),
+        location ? el('span', { class: 'problems-location mono', text: location }) : el('span'),
+      );
+      list.appendChild(row);
+    }
+    this.problemsView.appendChild(list);
+  }
+
+  /** Validates the workspace against Arcade rules and reports into Problems. */
+  checkCompatibility(): CompatibilityIssue[] {
+    const files = this.workspace
+      .list()
+      .filter((entry) => entry.type === 'file' && isPlayPayloadPath(entry.path))
+      .map((entry) => ({
+        path: entry.path,
+        content: entry.binary ? undefined : entry.content,
+        size: entry.size ?? (entry.binary ? undefined : new TextEncoder().encode(entry.content).length),
+        binary: entry.binary === true,
+      }));
+    const issues = checkArcadeCompatibility(files);
+    this.setCompatibilityDiagnostics(issues);
+    const errors = issues.filter((issue) => issue.severity === 'error').length;
+    if (errors > 0) {
+      toast('Arcade compatibility', `${errors} blocking issue(s). See Problems.`, 'warning', 4000);
+    } else {
+      toast('Arcade compatibility', 'No blocking issues found.', 'success', 2200);
+    }
+    this.selectPanel('problems');
+    return issues;
   }
 
   // ------------------------------------------------------------
@@ -1716,6 +1942,56 @@ export class App implements ShellHostish {
     } catch (error) {
       toast('Delete failed', error instanceof Error ? error.message : String(error), 'error');
     }
+  }
+
+  private async openWorkspaceSwitcher(): Promise<void> {
+    const records = await listWorkspaces();
+    const items: PaletteItem[] = records
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .map((record) => ({
+        id: `workspace:${record.id}`,
+        label: record.id === this.workspace.id ? `${record.name} (current)` : record.name,
+        group: 'Workspaces',
+        icon: 'hard-drive',
+        run: () => {
+          if (record.id !== this.workspace.id) void this.switchWorkspace(record.id);
+        },
+      }));
+    items.push({
+      id: 'workspace:new',
+      label: t('workspace.create'),
+      group: 'Workspaces',
+      icon: 'plus',
+      run: () => void this.createWorkspace(),
+    });
+    items.push({
+      id: 'workspace:rename',
+      label: 'Rename current workspace',
+      group: 'Workspaces',
+      icon: 'pencil',
+      run: () => void this.renameWorkspace(),
+    });
+    openPalette(items, {
+      placeholder: t('workspace.switch'),
+      emptyText: 'No workspaces.',
+      prefix: 'hard-drive',
+    });
+  }
+
+  private async createWorkspace(): Promise<void> {
+    const name = await promptDialog(t('workspace.create'), 'Workspace name', '', {
+      confirmLabel: t('workspace.create'),
+    });
+    if (!name) return;
+    const created = await Workspace.create(name);
+    await this.switchWorkspace(created.id);
+  }
+
+  /** Switching reloads the page so every pane gets the new workspace coherently. */
+  private async switchWorkspace(id: string): Promise<void> {
+    this.flushSaves();
+    await Workspace.open(id);
+    window.location.reload();
   }
 
   private async renameWorkspace(): Promise<void> {
@@ -2374,6 +2650,22 @@ export class App implements ShellHostish {
         run: () => void this.saveAll(),
       },
       {
+        id: 'edit.undo',
+        label: `Edit: ${t('command.undo')}`,
+        group: 'Edit',
+        icon: 'undo-2',
+        hint: modShortcut('Z'),
+        run: () => void this.undo(),
+      },
+      {
+        id: 'edit.redo',
+        label: `Edit: ${t('command.redo')}`,
+        group: 'Edit',
+        icon: 'redo-2',
+        hint: modShortcut('Shift+Z'),
+        run: () => void this.redo(),
+      },
+      {
         id: 'file.rename',
         label: 'File: Rename…',
         group: 'File',
@@ -2423,6 +2715,20 @@ export class App implements ShellHostish {
         group: 'Workspace',
         icon: 'upload',
         run: () => void this.exportWorkspace(),
+      },
+      {
+        id: 'workspace.switch',
+        label: `Workspace: ${t('workspace.switch')}`,
+        group: 'Workspace',
+        icon: 'hard-drive',
+        run: () => void this.openWorkspaceSwitcher(),
+      },
+      {
+        id: 'workspace.create',
+        label: `Workspace: ${t('workspace.create')}`,
+        group: 'Workspace',
+        icon: 'plus',
+        run: () => void this.createWorkspace(),
       },
       {
         id: 'workspace.rename',
@@ -2495,6 +2801,13 @@ export class App implements ShellHostish {
         icon: 'play',
         hint: modShortcut('Shift+Enter'),
         run: () => this.runTestPlay(),
+      },
+      {
+        id: 'test.compatibility',
+        label: `Test: ${t('command.checkCompatibility')}`,
+        group: 'Test',
+        icon: 'check',
+        run: () => this.checkCompatibility(),
       },
       {
         id: 'test.stop',
@@ -2795,6 +3108,16 @@ export class App implements ShellHostish {
           this.openQuickOpen();
           return;
         }
+        if (matchesShortcut(event, 'mod+z') && !event.shiftKey) {
+          event.preventDefault();
+          void this.undo();
+          return;
+        }
+        if (matchesShortcut(event, 'mod+shift+z') || matchesShortcut(event, 'mod+y')) {
+          event.preventDefault();
+          void this.redo();
+          return;
+        }
         if (matchesShortcut(event, 'mod+s')) {
           event.preventDefault();
           if (event.shiftKey) void this.saveAll();
@@ -2891,10 +3214,6 @@ export function startApp(): void {
     .then((app) => {
       root.replaceChildren();
       app.mount(root);
-      window.addEventListener('beforeunload', (event) => {
-        const anyDirty = false;
-        if (anyDirty) event.preventDefault();
-      });
     })
     .catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
