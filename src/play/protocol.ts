@@ -34,6 +34,7 @@ export interface PlayConsoleEntry {
 
 const CONSOLE_LEVELS = new Set<string>(['log', 'info', 'warn', 'error']);
 const MAX_CONSOLE_SOURCE_LENGTH = 255;
+const MAX_CONSOLE_LINE = 1_000_000;
 
 export type PlayHostMessage =
   | { type: 'play:init'; requestId: string }
@@ -124,9 +125,20 @@ function isConsoleEntry(value: unknown): value is PlayConsoleEntry {
   if (value.source !== undefined) {
     if (typeof value.source !== 'string' || value.source.length > MAX_CONSOLE_SOURCE_LENGTH) return false;
   }
-  if (value.line !== undefined && (!Number.isInteger(value.line) || (value.line as number) < 0)) return false;
-  if (value.column !== undefined && (!Number.isInteger(value.column) || (value.column as number) < 0))
+  if (
+    value.line !== undefined &&
+    (!Number.isInteger(value.line) || (value.line as number) < 0 || (value.line as number) > MAX_CONSOLE_LINE)
+  ) {
     return false;
+  }
+  if (
+    value.column !== undefined &&
+    (!Number.isInteger(value.column) ||
+      (value.column as number) < 0 ||
+      (value.column as number) > MAX_CONSOLE_LINE)
+  ) {
+    return false;
+  }
   return true;
 }
 

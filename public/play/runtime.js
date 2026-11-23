@@ -26,8 +26,10 @@
   const PLACEHOLDER = /blob:flaxia-play\/([^"'()\s]+)/g;
   const ARCHIVE_ORIGIN = 'https://zip.invalid/';
   const MAX_CONSOLE_MESSAGE = 500;
+  const MAX_CONSOLE_LINE = 1000000;
 
   let files = new Map();
+  let consoleWrapped = false;
   let texts = {};
   let storage = {};
   const blobs = new Map();
@@ -144,21 +146,41 @@
     }
   };
 
+  /** Maps a blob/archive URL back to the payload path it was created from. */
+  const sourceOf = (value) => {
+    if (typeof value !== 'string' || !value) return entry || null;
+    if (value.startsWith('blob:')) {
+      for (const [path, url] of blobs) if (url === value) return path;
+      return entry || null;
+    }
+    if (value.indexOf('/play/runtime.html') >= 0) return entry || null;
+    try {
+      const url = new URL(value, ARCHIVE_ORIGIN);
+      if (url.origin === ARCHIVE_ORIGIN.replace(/\/$/, '')) {
+        return decodeURIComponent(url.pathname.slice(1));
+      }
+    } catch {
+      // Not an archive-relative URL.
+    }
+    return value.slice(0, 255);
+  };
+
   /**
    * Bridges the game's console and uncaught errors to the studio Output panel.
    *
-   * The game frame has an opaque origin, so the browser devtools cannot always
-   * reach it. Installing these listeners before the entry document is written
-   * means game scripts are covered from their first line.
+   * `document.open()` removes every window listener, so this must be called
+   * again after opening the game document and before writing it. Console
+   * methods live on `window` and only need wrapping once.
    */
   const installDiagnostics = () => {
     const relay = (level, message, source, line, column) => {
-      const entry = { level, message: String(message).slice(0, MAX_CONSOLE_MESSAGE) };
-      if (source) entry.source = String(source).slice(0, 255);
-      if (Number.isFinite(line) && line > 0) entry.line = line;
-      if (Number.isFinite(column) && column > 0) entry.column = column;
+      const mapped = sourceOf(source);
+      const record = { level, message: String(message).slice(0, MAX_CONSOLE_MESSAGE) };
+      if (mapped) record.source = String(mapped).slice(0, 255);
+      if (Number.isFinite(line) && line > 0) record.line = Math.min(line, MAX_CONSOLE_LINE);
+      if (Number.isFinite(column) && column > 0) record.column = Math.min(column, MAX_CONSOLE_LINE);
       try {
-        window.parent.postMessage({ type: 'play:runtime-console', entry }, '*');
+        window.parent.postMessage({ type: 'play:runtime-console', entry: record }, '*');
       } catch {
         // The frame may already be detached.
       }
@@ -185,6 +207,8 @@
       relay('error', reason?.message ? reason.message : String(reason));
     });
 
+    if (consoleWrapped) return;
+    consoleWrapped = true;
     for (const level of ['log', 'info', 'warn', 'error']) {
       const original = console[level];
       if (typeof original !== 'function') continue;
@@ -328,6 +352,9 @@
 
     const html = sanitizeDocument(substitute(rawText(entry)));
     document.open();
+    // document.open() removes window listeners; reinstall before the game's
+    // scripts run so their first error is still captured.
+    installDiagnostics();
     document.write(html);
     document.close();
     window.parent.postMessage({ type: 'play:runtime-started' }, '*');
