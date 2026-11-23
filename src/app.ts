@@ -19,6 +19,7 @@ import { copyText } from './lib/clipboard';
 import { el, formatBytes, iconButton } from './lib/dom';
 import { type Command, HistoryService } from './lib/history';
 import { fileIcon, type IconName, icon } from './lib/icons';
+import { randomId } from './lib/id';
 import {
   applyLayoutSizes,
   clampInspectorWidth,
@@ -101,6 +102,7 @@ interface TreeNode {
 }
 
 const MAX_OUTPUT_LINES = 600;
+const MAX_PROBLEMS_LINES = 300;
 
 export class App implements ShellHostish {
   readonly workspace: Workspace;
@@ -170,9 +172,11 @@ export class App implements ShellHostish {
   private saveTimers = new Map<string, number>();
   private readonly fileVersions = new Map<string, number>();
   private workspaceChannel: ReturnType<typeof createWorkspaceChannel> | null = null;
+  private readonly tabId = randomId();
   private staleWorkspaceNotified = false;
   private readonly history = new HistoryService();
-  private diagnostics: Diagnostic[] = [];
+  private compatibilityDiagnostics: Diagnostic[] = [];
+  private consoleDiagnostics: Diagnostic[] = [];
   private warnedApkCors = false;
   private lastLinuxStatus: LinuxStatus;
   private linuxUnsubscribe: (() => void) | null = null;
@@ -287,7 +291,10 @@ export class App implements ShellHostish {
     this.shell.setTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
     this.linuxUnsubscribe = this.linux.subscribe((status) => this.handleLinuxStatus(status));
     this.workspaceChannel = createWorkspaceChannel((message) => {
-      if (message.workspaceId !== this.workspace.id || message.rev <= this.workspace.rev) return;
+      // BroadcastChannel never delivers to the posting object, and the sender
+      // id filters out foreign channels. A rev comparison would miss changes
+      // from tabs that started with the same local revision.
+      if (message.workspaceId !== this.workspace.id) return;
       if (this.staleWorkspaceNotified) return;
       this.staleWorkspaceNotified = true;
       this.log(t('workspace.otherTabChanged'));
@@ -303,7 +310,7 @@ export class App implements ShellHostish {
       }).then((value) => {
         if (value === 'reload') window.location.reload();
       });
-    });
+    }, this.tabId);
     this.bindKeys();
     window.addEventListener('flaxia:theme', () => {
       const resolved = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
@@ -316,7 +323,7 @@ export class App implements ShellHostish {
       if (this.openTabs.some((path) => this.editor.isDirty(path))) event.preventDefault();
     });
     window.addEventListener('pagehide', () => {
-      this.flushSaves();
+      void this.flushSaves({ suppressDialogs: true });
       this.workspaceChannel?.close();
       this.workspace.setChangeNotifier(null);
       this.timeline.dispose();
@@ -1251,7 +1258,7 @@ export class App implements ShellHostish {
     this.renderStatus();
   }
 
-  openFile(path: string, line?: number): void {
+  openFile(path: string, line?: number, column = 1): void {
     if (this.workspace.isBinary(path)) {
       if (isMediaPath(path)) void this.openMediaFile(path);
       else void this.openBinaryFile(path);
@@ -1269,7 +1276,7 @@ export class App implements ShellHostish {
     this.welcome.classList.add('hidden');
     this.editor.open(path, content, languageForPath(path));
     this.fileVersions.set(path, this.workspace.versionOf(path));
-    if (line) window.setTimeout(() => this.editor.revealLine(path, line), 30);
+    if (line) window.setTimeout(() => this.editor.revealLine(path, line, column), 30);
     if (window.matchMedia?.('(max-width: 720px)').matches) this.sidebarVisible = false;
     this.setActiveView('editor');
     this.renderExplorer();
@@ -1528,6 +1535,9 @@ export class App implements ShellHostish {
     if (!discard && this.editor.isDirty(path)) await this.saveFile(path);
     if (this.mediaView.currentSourcePath === path) this.mediaView.clear();
     this.editor.close(path);
+    // The model's Monaco undo stack is disposed with it; drop its tokens so a
+    // later Ctrl+Z cannot consume a step that can no longer be replayed.
+    await this.history.removeByKey(`text:${path}`);
     const index = this.openTabs.indexOf(path);
     if (index >= 0) this.openTabs.splice(index, 1);
     if (this.activePath === path) {
@@ -1594,16 +1604,19 @@ export class App implements ShellHostish {
     this.renderStatus();
   }
 
-  /** Flushes pending autosaves before the page unloads. */
-  private flushSaves(): void {
-    for (const [path, timer] of this.saveTimers) {
-      window.clearTimeout(timer);
-      void this.saveFile(path, true);
-    }
+  /** Flushes pending autosaves and waits for the writes to finish. */
+  private async flushSaves(options: { suppressDialogs?: boolean } = {}): Promise<void> {
+    const pending = [...this.saveTimers.entries()];
     this.saveTimers.clear();
+    await Promise.all(
+      pending.map(([path, timer]) => {
+        window.clearTimeout(timer);
+        return this.saveFile(path, true, false, options.suppressDialogs === true);
+      }),
+    );
   }
 
-  private async saveFile(path: string, quiet = false, force = false): Promise<void> {
+  private async saveFile(path: string, quiet = false, force = false, suppressDialog = false): Promise<void> {
     const value = this.editor.getValue(path);
     if (value === null) return;
     const expected = force ? undefined : this.fileVersions.get(path);
@@ -1611,6 +1624,11 @@ export class App implements ShellHostish {
       await this.workspace.writeFile(path, value, expected);
     } catch (error) {
       if (!(error instanceof ConflictError)) throw error;
+      if (suppressDialog) {
+        // Never leave a blocking dialog during unload or workspace switching.
+        await this.saveFile(path, quiet, true, true);
+        return;
+      }
       const choice = await openDialog({
         title: t('workspace.conflictTitle'),
         body: `${path}\n${t('workspace.otherTabChanged')}`,
@@ -1623,15 +1641,19 @@ export class App implements ShellHostish {
         ],
       });
       if (choice === 'mine') {
-        await this.saveFile(path, quiet, true);
+        await this.saveFile(path, quiet, true, suppressDialog);
         return;
       }
       if (choice === 'theirs') {
-        const stored = this.workspace.readFile(path);
-        if (stored !== null) this.editor.setValue(path, stored);
-        this.fileVersions.set(path, this.workspace.versionOf(path));
-        this.editor.markSaved(path);
-        this.renderTabs();
+        // Read the authoritative record from IndexedDB — the in-memory copy
+        // is exactly what lost the race.
+        const stored = await this.workspace.fetchStoredFile(path);
+        if (stored && !stored.binary) {
+          this.editor.setValue(path, stored.content);
+          this.fileVersions.set(path, stored.version);
+          this.editor.markSaved(path);
+          this.renderTabs();
+        }
       }
       return;
     }
@@ -1657,7 +1679,9 @@ export class App implements ShellHostish {
   // Diagnostics
   // ------------------------------------------------------------
   private setCompatibilityDiagnostics(issues: readonly CompatibilityIssue[]): void {
-    this.diagnostics = issues.map((issue) => ({
+    // Compatibility results replace only their own section; game console
+    // diagnostics from the current run stay visible.
+    this.compatibilityDiagnostics = issues.map((issue) => ({
       code: `${issue.scope}:${issue.code}`,
       severity: issue.severity,
       message: issue.message,
@@ -1674,13 +1698,18 @@ export class App implements ShellHostish {
     if (entry.level !== 'error' && entry.level !== 'warn') return;
     const code = `play:${entry.level}`;
     if (
-      this.diagnostics.some(
-        (item) => item.code === code && item.message === entry.message && item.path === entry.source,
+      this.consoleDiagnostics.some(
+        (item) =>
+          item.code === code &&
+          item.message === entry.message &&
+          item.path === entry.source &&
+          item.line === entry.line &&
+          item.column === entry.column,
       )
     ) {
       return;
     }
-    this.diagnostics.push({
+    this.consoleDiagnostics.push({
       code,
       severity: entry.level === 'error' ? 'error' : 'warning',
       message: entry.message,
@@ -1688,12 +1717,14 @@ export class App implements ShellHostish {
       line: entry.line,
       column: entry.column,
     });
+    if (this.consoleDiagnostics.length > MAX_PROBLEMS_LINES) this.consoleDiagnostics.shift();
     this.renderProblems();
   }
 
   private renderProblems(): void {
     this.problemsView.replaceChildren();
-    if (this.diagnostics.length === 0) {
+    const items = [...this.compatibilityDiagnostics, ...this.consoleDiagnostics];
+    if (items.length === 0) {
       this.problemsView.appendChild(
         el('div', { class: 'terminal-note' }, [
           icon('check', 15),
@@ -1703,7 +1734,7 @@ export class App implements ShellHostish {
       return;
     }
     const list = el('div', { class: 'problems-list' });
-    for (const item of this.diagnostics) {
+    for (const item of items) {
       const location = item.path
         ? `${item.path}${item.line ? `:${item.line}${item.column ? `:${item.column}` : ''}` : ''}`
         : '';
@@ -1713,8 +1744,7 @@ export class App implements ShellHostish {
         title: item.code,
         on: {
           click: () => {
-            if (!item.path || !this.editor.hasModel(item.path)) return;
-            this.editor.revealLine(item.path, item.line ?? 1, item.column ?? 1);
+            if (item.path) this.openFile(item.path, item.line ?? 1, item.column ?? 1);
           },
         },
       });
@@ -1854,6 +1884,19 @@ export class App implements ShellHostish {
     return '';
   }
 
+  private async closeTabsInside(path: string): Promise<void> {
+    for (const tab of [...this.openTabs]) {
+      if (isPathInside(tab, path)) await this.closeFile(tab, true);
+    }
+  }
+
+  private renderWorkspaceStructure(): void {
+    this.renderExplorer();
+    this.renderTabs();
+    this.renderBreadcrumbs();
+    this.renderStatus();
+  }
+
   private async newFile(directory?: string): Promise<void> {
     const base = directory ?? this.targetDirectory();
     const name = await promptDialog('New File', 'File name', '', {
@@ -1862,11 +1905,23 @@ export class App implements ShellHostish {
       confirmLabel: 'Create',
     });
     if (!name) return;
+    const path = joinPath(base, name);
     try {
-      const path = await this.workspace.createFile(joinPath(base, name), '');
-      this.renderExplorer();
-      this.openFile(path);
-      this.log(`Created ${path}`);
+      await this.history.run({
+        id: `create-file:${path}`,
+        label: 'Create file',
+        execute: async () => {
+          await this.workspace.createFile(path, '');
+          this.renderWorkspaceStructure();
+          this.openFile(path);
+          this.log(`Created ${path}`);
+        },
+        undo: async () => {
+          await this.closeTabsInside(path);
+          await this.workspace.remove(path);
+          this.renderWorkspaceStructure();
+        },
+      });
     } catch (error) {
       toast('Could not create file', error instanceof Error ? error.message : String(error), 'error');
     }
@@ -1880,11 +1935,23 @@ export class App implements ShellHostish {
       confirmLabel: 'Create',
     });
     if (!name) return;
+    const path = joinPath(base, name);
     try {
-      const path = await this.workspace.createFolder(joinPath(base, name));
-      this.selectedPath = path;
-      this.renderExplorer();
-      this.log(`Created folder ${path}`);
+      await this.history.run({
+        id: `create-folder:${path}`,
+        label: 'Create folder',
+        execute: async () => {
+          await this.workspace.createFolder(path);
+          this.selectedPath = path;
+          this.renderWorkspaceStructure();
+          this.log(`Created folder ${path}`);
+        },
+        undo: async () => {
+          await this.closeTabsInside(path);
+          await this.workspace.remove(path);
+          this.renderWorkspaceStructure();
+        },
+      });
     } catch (error) {
       toast('Could not create folder', error instanceof Error ? error.message : String(error), 'error');
     }
@@ -1894,17 +1961,23 @@ export class App implements ShellHostish {
     const next = await promptDialog('Rename', 'New path', path, { confirmLabel: 'Rename' });
     if (!next || next === path) return;
     try {
-      const renamed = await this.workspace.rename(path, next);
-      this.remapTabs(path, renamed);
-      this.selectedPath = renamed;
-      this.renderExplorer();
-      this.renderTabs();
-      this.renderBreadcrumbs();
-      if (this.activePath) {
-        const content = this.workspace.readFile(this.activePath);
-        if (content !== null) this.editor.open(this.activePath, content, languageForPath(this.activePath));
-      }
-      this.log(`Renamed ${path} → ${renamed}`);
+      await this.history.run({
+        id: `rename:${path}:${next}`,
+        label: 'Rename',
+        execute: async () => {
+          await this.workspace.rename(path, next);
+          this.remapTabs(path, next);
+          this.selectedPath = next;
+          this.renderWorkspaceStructure();
+          this.log(`Renamed ${path} → ${next}`);
+        },
+        undo: async () => {
+          await this.workspace.rename(next, path);
+          this.remapTabs(next, path);
+          this.selectedPath = path;
+          this.renderWorkspaceStructure();
+        },
+      });
     } catch (error) {
       toast('Rename failed', error instanceof Error ? error.message : String(error), 'error');
     }
@@ -1927,20 +2000,45 @@ export class App implements ShellHostish {
   }
 
   private async deletePath(path: string): Promise<void> {
-    const confirmed = await confirmDialog('Delete', `Delete "${path}"? This cannot be undone.`, {
+    const confirmed = await confirmDialog('Delete', `Delete "${path}"? You can undo this with Ctrl+Z.`, {
       danger: true,
       confirmLabel: 'Delete',
     });
     if (!confirmed) return;
     try {
-      for (const tab of [...this.openTabs]) {
-        if (isPathInside(tab, path)) await this.closeFile(tab, true);
+      // Snapshot everything that is about to be removed so undo can restore it.
+      const entries = this.workspace.list().filter((entry) => isPathInside(entry.path, path));
+      const blobs = new Map<string, Blob>();
+      for (const entry of entries) {
+        if (entry.type !== 'file' || !entry.binary) continue;
+        const blob = await this.workspace.readBlob(entry.path);
+        if (blob) blobs.set(entry.path, blob);
       }
-      await this.workspace.remove(path);
-      if (this.selectedPath && isPathInside(this.selectedPath, path)) this.selectedPath = null;
-      this.renderExplorer();
-      this.renderTabs();
-      this.log(`Deleted ${path}`);
+      await this.history.run({
+        id: `delete:${path}`,
+        label: 'Delete',
+        execute: async () => {
+          await this.closeTabsInside(path);
+          await this.workspace.remove(path);
+          if (this.selectedPath && isPathInside(this.selectedPath, path)) this.selectedPath = null;
+          this.renderWorkspaceStructure();
+          this.log(`Deleted ${path}`);
+        },
+        undo: async () => {
+          for (const entry of entries) {
+            if (entry.type === 'dir') await this.workspace.createFolder(entry.path);
+          }
+          for (const entry of entries) {
+            if (entry.type !== 'file') continue;
+            if (!entry.binary) await this.workspace.createFile(entry.path, entry.content);
+            else {
+              const blob = blobs.get(entry.path);
+              if (blob) await this.workspace.writeBinaryFile(entry.path, blob, entry.mime);
+            }
+          }
+          this.renderWorkspaceStructure();
+        },
+      });
     } catch (error) {
       toast('Delete failed', error instanceof Error ? error.message : String(error), 'error');
     }
@@ -1985,13 +2083,24 @@ export class App implements ShellHostish {
       confirmLabel: t('workspace.create'),
     });
     if (!name) return;
+    // Save the current workspace before Workspace.create() changes the active id.
+    await this.flushSaves();
     const created = await Workspace.create(name);
     await this.switchWorkspace(created.id);
   }
 
   /** Switching reloads the page so every pane gets the new workspace coherently. */
   private async switchWorkspace(id: string): Promise<void> {
-    this.flushSaves();
+    if (id === this.workspace.id) return;
+    await this.flushSaves();
+    if (this.openTabs.some((path) => this.editor.isDirty(path))) {
+      const confirmed = await confirmDialog(
+        t('workspace.switch'),
+        'You have unsaved changes. Switch workspace anyway?',
+        { confirmLabel: 'Switch' },
+      );
+      if (!confirmed) return;
+    }
     await Workspace.open(id);
     window.location.reload();
   }
@@ -3155,11 +3264,15 @@ export class App implements ShellHostish {
         }
         if (matchesShortcut(event, 'mod+z') && !event.shiftKey) {
           event.preventDefault();
+          // Monaco also binds Ctrl+Z; stop propagation so it does not undo a
+          // second time behind the app history's back.
+          event.stopPropagation();
           void this.undo();
           return;
         }
         if (matchesShortcut(event, 'mod+shift+z') || matchesShortcut(event, 'mod+y')) {
           event.preventDefault();
+          event.stopPropagation();
           void this.redo();
           return;
         }

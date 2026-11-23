@@ -94,7 +94,14 @@ export function openDatabase(): Promise<IDBDatabase> {
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error('Failed to open IndexedDB'));
-    request.onblocked = () => reject(new Error('IndexedDB upgrade is blocked by another tab.'));
+    request.onblocked = () => {
+      // `onblocked` is not final: once the other tab closes, `onsuccess` still
+      // arrives. Keep the connection retryable instead of caching a rejection.
+      dbPromise = null;
+      reject(
+        new Error('IndexedDB upgrade is blocked by another tab. Close other Flaxia Studio tabs and retry.'),
+      );
+    };
   });
   return dbPromise;
 }
@@ -147,6 +154,61 @@ export async function putFiles(records: FileRecord[]): Promise<void> {
   const store = tx.objectStore('files');
   for (const record of records) store.put(record);
   await transactionDone(tx);
+}
+
+/** Reads one file record by its workspace-scoped id (O(1) lookup). */
+export async function getFile(workspaceId: string, path: string): Promise<FileRecord | undefined> {
+  const db = await openDatabase();
+  const tx = db.transaction('files', 'readonly');
+  return requestToPromise(tx.objectStore('files').get(`${workspaceId}:${path}`));
+}
+
+/**
+ * Atomically checks the persisted version and writes the next one in a single
+ * readwrite transaction. This closes the check/write race between tabs that a
+ * separate `get` + `put` would leave open.
+ */
+export async function putFileVersioned(
+  workspaceId: string,
+  path: string,
+  expected: number | undefined,
+  build: (nextVersion: number) => FileRecord,
+): Promise<{ ok: boolean; version: number }> {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('files', 'readwrite');
+    const store = tx.objectStore('files');
+    let version = 0;
+    let settled = false;
+    const request = store.get(`${workspaceId}:${path}`);
+    request.onsuccess = () => {
+      const current = request.result as FileRecord | undefined;
+      if (expected !== undefined && (current?.version ?? 0) !== expected) {
+        version = current?.version ?? 0;
+        settled = true;
+        tx.abort();
+        resolve({ ok: false, version });
+        return;
+      }
+      version = (current?.version ?? 0) + 1;
+      store.put(build(version));
+    };
+    tx.oncomplete = () => {
+      if (settled) return;
+      settled = true;
+      resolve({ ok: true, version });
+    };
+    tx.onerror = () => {
+      if (settled) return;
+      settled = true;
+      reject(tx.error ?? new Error('IndexedDB file write failed.'));
+    };
+    tx.onabort = () => {
+      if (settled) return;
+      settled = true;
+      reject(tx.error ?? new Error('IndexedDB file write was aborted.'));
+    };
+  });
 }
 
 export async function deleteFiles(ids: string[]): Promise<void> {

@@ -6,11 +6,13 @@ import {
   type FileRecord,
   getActiveWorkspaceId,
   getBlob,
+  getFile,
   getWorkspace,
   listFiles,
   listWorkspaces,
   putBlob,
   putFiles,
+  putFileVersioned,
   putWorkspace,
   setActiveWorkspaceId,
   type WorkspaceRecord,
@@ -173,7 +175,10 @@ export class Workspace {
 
   private async touch(): Promise<void> {
     this.updatedAt = Date.now();
-    this.rev += 1;
+    // Read the persisted revision so two tabs starting from the same value do
+    // not write colliding (or backwards) revisions.
+    const stored = await getWorkspace(this.id);
+    this.rev = Math.max(this.rev, stored?.rev ?? 1) + 1;
     await putWorkspace({
       id: this.id,
       name: this.name,
@@ -212,23 +217,27 @@ export class Workspace {
     return this.entries.get(normalizePath(path))?.version ?? 0;
   }
 
-  /** Authoritative persisted version, used to catch writes from other tabs. */
-  private async storedVersionOf(path: string): Promise<number> {
-    const records = await listFiles(this.id);
-    return records.find((record) => record.path === path)?.version ?? 0;
-  }
-
-  /** Resolves the version a write must supersede, enforcing a lock if given. */
-  private async versionForWrite(path: string, expectedVersion?: number): Promise<number> {
-    const local = this.versionOf(path);
-    if (expectedVersion !== undefined && local !== expectedVersion) {
-      throw new ConflictError(path, expectedVersion, local);
-    }
-    const stored = await this.storedVersionOf(path);
-    if (expectedVersion !== undefined && stored !== expectedVersion) {
-      throw new ConflictError(path, expectedVersion, stored);
-    }
-    return Math.max(local, stored);
+  /**
+   * Reads the persisted version of one file and refreshes the local cache.
+   * Used after a conflict so "Their version" shows the real remote content.
+   */
+  async fetchStoredFile(path: string): Promise<WorkspaceEntry | null> {
+    const normalized = normalizePath(path);
+    const record = await getFile(this.id, normalized);
+    if (!record) return null;
+    const entry: WorkspaceEntry = {
+      path: record.path,
+      type: record.type,
+      content: record.content,
+      binary: record.binary === true,
+      blobId: record.blobId,
+      size: record.size,
+      mime: record.mime,
+      version: record.version ?? 1,
+      updatedAt: record.updatedAt,
+    };
+    this.entries.set(record.path, entry);
+    return entry;
   }
 
   readFile(path: string): string | null {
@@ -282,19 +291,31 @@ export class Workspace {
   async writeFile(path: string, content: string, expectedVersion?: number): Promise<void> {
     const normalized = normalizePath(path);
     if (!normalized) throw new Error('Cannot write to the workspace root.');
-    const actual = await this.versionForWrite(normalized, expectedVersion);
+    if (expectedVersion !== undefined && this.versionOf(normalized) !== expectedVersion) {
+      throw new ConflictError(normalized, expectedVersion, this.versionOf(normalized));
+    }
     await this.ensureParents(normalized);
     const previous = this.entries.get(normalized)?.blobId;
-    const entry: WorkspaceEntry = {
+    const result = await putFileVersioned(this.id, normalized, expectedVersion, (version) => ({
+      id: recordId(this.id, normalized),
+      workspaceId: this.id,
       path: normalized,
       type: 'file',
       content,
       binary: false,
-      version: actual + 1,
+      version,
       updatedAt: Date.now(),
-    };
-    this.entries.set(normalized, entry);
-    await this.persist(entry);
+    }));
+    if (!result.ok) throw new ConflictError(normalized, expectedVersion ?? result.version, result.version);
+    this.entries.set(normalized, {
+      path: normalized,
+      type: 'file',
+      content,
+      binary: false,
+      version: result.version,
+      updatedAt: Date.now(),
+    });
+    await this.touch();
     if (previous) await deleteBlobs([previous]);
   }
 
@@ -311,7 +332,9 @@ export class Workspace {
   ): Promise<string> {
     const normalized = normalizePath(path);
     if (!normalized) throw new Error('Cannot write to the workspace root.');
-    const actual = await this.versionForWrite(normalized, expectedVersion);
+    if (expectedVersion !== undefined && this.versionOf(normalized) !== expectedVersion) {
+      throw new ConflictError(normalized, expectedVersion, this.versionOf(normalized));
+    }
     const blob = data instanceof Blob ? data : new Blob([toBlobPart(data)], { type: mime ?? '' });
     if (blob.size > MAX_BINARY_BYTES) {
       throw new Error(`${normalized} is larger than the 2 GB file limit.`);
@@ -320,20 +343,34 @@ export class Workspace {
     const previous = this.entries.get(normalized)?.blobId;
     const blobId = randomId();
     await putBlob({ id: blobId, blob, size: blob.size });
-    const entry: WorkspaceEntry = {
-      path: normalized,
-      type: 'file',
-      content: '',
-      binary: true,
-      blobId,
-      size: blob.size,
-      mime: mime ?? (blob.type || undefined),
-      version: actual + 1,
-      updatedAt: Date.now(),
-    };
-    this.entries.set(normalized, entry);
+    const resolvedMime = mime ?? (blob.type || undefined);
     try {
-      await this.persist(entry);
+      const result = await putFileVersioned(this.id, normalized, expectedVersion, (version) => ({
+        id: recordId(this.id, normalized),
+        workspaceId: this.id,
+        path: normalized,
+        type: 'file',
+        content: '',
+        binary: true,
+        blobId,
+        size: blob.size,
+        mime: resolvedMime,
+        version,
+        updatedAt: Date.now(),
+      }));
+      if (!result.ok) throw new ConflictError(normalized, expectedVersion ?? result.version, result.version);
+      this.entries.set(normalized, {
+        path: normalized,
+        type: 'file',
+        content: '',
+        binary: true,
+        blobId,
+        size: blob.size,
+        mime: resolvedMime,
+        version: result.version,
+        updatedAt: Date.now(),
+      });
+      await this.touch();
     } catch (error) {
       await deleteBlobs([blobId]);
       throw error;
