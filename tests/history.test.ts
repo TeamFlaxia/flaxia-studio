@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { HistoryService, type Command } from '../src/lib/history.ts';
+import { type Command, HistoryService } from '../src/lib/history.ts';
 
 function valueCommand(value: { current: string }, next: string, label = 'Set value'): Command {
   const previous = value.current;
