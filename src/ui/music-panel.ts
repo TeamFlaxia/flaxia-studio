@@ -73,7 +73,7 @@ export class MusicPanel {
       el('span', { class: 'piano-roll-title', text: t('play.noteTrack') }),
       el('label', { class: 'music-field' }, [t('play.bpm'), this.bpmInput]),
       el('label', { class: 'music-field' }, [t('play.scale'), this.scaleSelect]),
-      el('span', { class: 'music-field' }, [`${t('template.apply')}:`, this.noteCount]),
+      el('span', { class: 'music-field' }, [`${t('play.noteCount')}:`, this.noteCount]),
       el('span', { class: 'tab-spacer' }),
       icon('file-audio', 14),
     ]);

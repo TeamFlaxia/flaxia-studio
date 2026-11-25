@@ -406,10 +406,12 @@ try {
       }
       const notes = page.locator('.piano-roll-note');
       const beforeNotes = await notes.count();
-      const surface = (await canvas.count()) > 0 ? canvas : page.locator('.piano-roll').first();
+      // The canvas is much wider than its scroll viewport; clicking a fraction
+      // of the canvas width lands outside the visible editor. Use the scroller.
+      const surface = page.locator('.piano-roll-scroll').first();
       const box = await surface.boundingBox();
       check('piano roll has a clickable surface', (box?.width ?? 0) > 0, JSON.stringify(box));
-      await page.mouse.click(box.x + box.width * 0.25, box.y + box.height * 0.5);
+      await page.mouse.click(box.x + Math.min(80, box.width * 0.2), box.y + box.height * 0.5);
       await page.waitForTimeout(420);
       const afterNotes = await notes.count();
       check('piano roll note added on click', afterNotes > beforeNotes, `${beforeNotes} -> ${afterNotes}`);

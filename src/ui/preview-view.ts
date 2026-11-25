@@ -181,6 +181,10 @@ export class PreviewView {
     }
   }
 
+  get isPlaying(): boolean {
+    return this.playing;
+  }
+
   /** Moves the monitor, e.g. when the timeline playhead is scrubbed. */
   setPlayhead(ms: number): void {
     const duration = this.doc ? timelineDuration(this.doc) : 0;
@@ -199,11 +203,66 @@ export class PreviewView {
    * Used by the frame-sequence exporter; the monitor need not be visible.
    */
   async captureFrame(ms: number): Promise<Blob | null> {
-    if (!this.doc) return null;
-    const duration = timelineDuration(this.doc);
+    const doc = this.doc;
+    if (!doc || this.disposed) return null;
+    const duration = timelineDuration(doc);
     this.playheadMs = Math.max(0, Math.min(duration, Math.round(ms)));
+    this.pause();
+
+    // Make sure every visual clip at this instant is decoded and seeked before
+    // the canvas is sampled. Otherwise the first frames are black and videos
+    // show the previously decoded frame.
+    const clips: Clip[] = [];
+    for (const track of doc.tracks) {
+      if (track.kind !== 'video') continue;
+      const clip = activeClip(track.clips, this.playheadMs);
+      if (clip && (mediaKind(clip.path) === 'image' || mediaKind(clip.path) === 'video')) clips.push(clip);
+    }
+    await Promise.all(
+      clips.map(async (clip) => {
+        if (!this.blobUrls.has(clip.path)) await this.loadUrl(clip.path);
+        if (!this.blobUrls.has(clip.path)) return;
+        if (mediaKind(clip.path) === 'image') {
+          let image = this.images.get(clip.path);
+          if (!image) {
+            this.prepareImage(clip.path);
+            image = this.images.get(clip.path) ?? undefined;
+          }
+          if (image && !image.complete) {
+            await new Promise<void>((resolve) => {
+              image?.addEventListener('load', () => resolve(), { once: true });
+              image?.addEventListener('error', () => resolve(), { once: true });
+            });
+          }
+          if (image?.decode) await image.decode().catch(() => undefined);
+          return;
+        }
+        let element = this.elements.get(clip.id);
+        if (!element) element = this.ensureMedia(clip, 'video') ?? undefined;
+        if (!(element instanceof HTMLVideoElement)) return;
+        const video = element;
+        video.pause();
+        if (video.readyState < 2) {
+          await new Promise<void>((resolve) => {
+            video.addEventListener('loadeddata', () => resolve(), { once: true });
+            video.addEventListener('error', () => resolve(), { once: true });
+          });
+        }
+        const target = clipTarget(clip, this.playheadMs);
+        if (Math.abs(video.currentTime - target) > 0.02) {
+          await new Promise<void>((resolve) => {
+            video.addEventListener('seeked', () => resolve(), { once: true });
+            try {
+              video.currentTime = target;
+            } catch {
+              resolve();
+            }
+          });
+        }
+      }),
+    );
+
     this.renderFrame(true);
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     return new Promise<Blob | null>((resolve) => this.canvas.toBlob(resolve, 'image/png'));
   }
 
@@ -466,7 +525,7 @@ export class PreviewView {
       } catch {
         // Metadata is not ready yet; the loadedmetadata handler retries.
       }
-      if (this.playing) void element.play().catch(() => undefined);
+      // Playback is started only by syncPlayback(), which honours mute/solo.
     };
     if (element.readyState >= 1) apply();
     else element.addEventListener('loadedmetadata', apply, { once: true });

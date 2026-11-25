@@ -430,6 +430,15 @@ export class PianoRollView {
         pitch: Math.min(this.toPitch, Math.max(this.fromPitch, original.pitch - deltaRow)),
       };
     }
+    if (
+      next.startTick === original.startTick &&
+      next.pitch === original.pitch &&
+      next.durationTick === original.durationTick
+    ) {
+      // A zero-movement drag must not rebuild the hit regions: dblclick needs
+      // the same note element to survive until the second click.
+      return;
+    }
     this.commit({
       ...this.clip,
       notes: this.clip.notes.map((note) => (note.id === drag.id ? next : note)),

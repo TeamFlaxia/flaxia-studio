@@ -38,6 +38,7 @@ export const en = {
     bpm: 'BPM',
     scale: 'Scale',
     noteTrack: 'Note track',
+    noteCount: 'Notes',
   },
   publish: {
     title: 'Publish project',

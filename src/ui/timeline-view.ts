@@ -14,6 +14,7 @@ import type { Workspace } from '../fs/workspace.ts';
 import { el, iconButton } from '../lib/dom';
 import { icon } from '../lib/icons';
 import { mediaKind } from '../lib/media';
+import { PeakCache, peaksFromBlob } from '../lib/peaks';
 import {
   addClip,
   addTrack,
@@ -30,6 +31,7 @@ import {
   moveClip,
   quantizeClip,
   removeClip,
+  removeTrack,
   setTrackFlag,
   snapCandidates,
   snapMs,
@@ -42,6 +44,7 @@ import {
 } from '../lib/timeline';
 import { showContextMenu } from './context-menu';
 import type { TimelineStore } from './timeline-store';
+import { WaveformView } from './waveform';
 
 export interface TimelineViewOptions {
   store: TimelineStore;
@@ -106,6 +109,7 @@ export class TimelineView {
   private frame = 0;
   private lastTick = 0;
   private audio = new Map<string, HTMLMediaElement>();
+  private readonly waveformCache = new PeakCache();
   private blobUrls = new Map<string, string>();
   private disposed = false;
 
@@ -347,6 +351,21 @@ export class TimelineView {
       el('span', { class: 'timeline-clip-handle is-start' }),
       el('span', { class: 'timeline-clip-handle is-end' }),
     );
+    if (track.kind === 'audio') {
+      const width = Math.max(MIN_CLIP_PX, this.msToPx(clip.durationMs));
+      const waveform = new WaveformView();
+      waveform.host.classList.add('timeline-waveform');
+      waveform.resize(width, 18);
+      node.appendChild(waveform.host);
+      void this.waveformCache
+        .load(clip.path, async () => {
+          const blob = await this.options.workspace.readBlob(clip.path);
+          if (!blob) return { samples: new Float32Array(), durationMs: clip.durationMs };
+          return peaksFromBlob(blob, 256);
+        })
+        .then((data) => waveform.setPeaks(data.samples))
+        .catch(() => undefined);
+    }
     node.addEventListener('dblclick', (event) => {
       event.preventDefault();
       this.options.onOpenSource(clip.path);
@@ -492,7 +511,9 @@ export class TimelineView {
 
     const deltaMs = this.pxToMs(event.clientX - drag.startX);
     if (Math.round(deltaMs) === 0) {
-      this.render();
+      // A plain click must not rebuild the clip node: dblclick needs the same
+      // element to survive between the two clicks.
+      this.select(drag.clipId);
       return;
     }
 
@@ -789,8 +810,7 @@ export class TimelineView {
   private removeTrackById(trackId: string): void {
     const doc = this.doc;
     if (!doc) return;
-    const next: TimelineDoc = { ...doc, tracks: doc.tracks.filter((track) => track.id !== trackId) };
-    this.commit(next, 'Remove track');
+    this.commit(removeTrack(doc, trackId), 'Remove track');
   }
 
   private select(clipId: string | null): void {

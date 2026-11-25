@@ -23,6 +23,8 @@ export interface Command {
   readonly mergeKey?: string;
   /** Returns a command representing both edits. */
   merge?(next: Command): Command;
+  /** Rebinds the command to a new path, e.g. after a file rename. */
+  remap?(from: string, to: string): Command;
 }
 
 export interface HistoryState {
@@ -117,6 +119,15 @@ export class HistoryService {
   removeByKey(key: string): void {
     this.undoStack = this.undoStack.filter((command) => command.mergeKey !== key);
     this.redoStack = this.redoStack.filter((command) => command.mergeKey !== key);
+    this.lastMerge = null;
+    this.emit();
+  }
+
+  /** Rebinds commands that depend on a path after a rename. */
+  remapKey(from: string, to: string): void {
+    const rewrite = (command: Command): Command => command.remap?.(from, to) ?? command;
+    this.undoStack = this.undoStack.map(rewrite);
+    this.redoStack = this.redoStack.map(rewrite);
     this.lastMerge = null;
     this.emit();
   }

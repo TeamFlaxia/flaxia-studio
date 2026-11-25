@@ -93,6 +93,21 @@ The workspace also edits media. Binary files are stored as Blobs in IndexedDB
 Phase 1 is arrangement + preview. Encoding/export, a frame-accurate video
 monitor, waveforms, transitions and image cropping are follow-ups.
 
+## Music editor and multimedia tooling
+
+- **Music** tab: an expanded piano-roll view of the note track, with BPM,
+  scale and per-note editing (click to add, drag to move, edges to resize,
+  double-click to delete). Notes persist in `.flaxia/music.json`.
+- **Timeline v2**: tempo/mode, per-clip adjustments and audio gain/fades,
+  plus per-track mute / solo / lock. `Q` quantizes to a 1/16 grid and the ruler
+  switches to bars/beats in music mode.
+- **Waveforms**: audio clips and the media preview show decoded peaks with a
+  playhead marker (LRU cached, no base64 in IndexedDB).
+- **Video: Export frames (ZIP)**: renders the timeline's clip ranges as a PNG
+  frame sequence plus `manifest.json`.
+- **App-wide Undo/Redo**: timeline edits, file operations and text edits share
+  one `HistoryService` stack.
+
 ## Preview monitor
 
 The **Preview** tab is the program monitor for the timeline. It is deliberately

@@ -143,6 +143,7 @@ export function addTrack(doc: TimelineDoc, kind: TrackKind): TimelineDoc {
 }
 
 export function removeTrack(doc: TimelineDoc, trackId: string): TimelineDoc {
+  if (isTrackLocked(doc, trackId)) return doc;
   return { ...doc, tracks: doc.tracks.filter((track) => track.id !== trackId) };
 }
 

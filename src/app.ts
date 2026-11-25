@@ -149,6 +149,7 @@ export class App implements ShellHostish {
   private musicPane!: HTMLElement;
   private musicPanel: MusicPanel;
   private musicSaveTimer: number | undefined;
+  private musicVersion = 0;
   private mediaView: MediaView;
   private inspector: InspectorView;
   private timelineStore: TimelineStore;
@@ -355,7 +356,11 @@ export class App implements ShellHostish {
         window.clearTimeout(this.musicSaveTimer);
         this.musicSaveTimer = undefined;
         void this.workspace
-          .writeFile(App.MUSIC_PATH, JSON.stringify(this.musicPanel.getClip()))
+          .writeFile(
+            App.MUSIC_PATH,
+            JSON.stringify(this.musicPanel.getClip()),
+            this.musicVersion || undefined,
+          )
           .catch(() => undefined);
       }
       this.workspaceChannel?.close();
@@ -1645,7 +1650,7 @@ export class App implements ShellHostish {
 
   private createTextCommand(path: string, steps: number): TextHistoryCommand {
     const editor = this.editor;
-    return {
+    const command: TextHistoryCommand = {
       id: `text:${path}`,
       label: 'Edit text',
       mergeKey: `text:${path}`,
@@ -1655,7 +1660,9 @@ export class App implements ShellHostish {
       undo: () => editor.undoSteps(path, steps),
       redo: () => editor.redoSteps(path, steps),
       merge: (later) => this.createTextCommand(path, steps + (later as TextHistoryCommand).steps),
+      remap: (from, to) => (path === from ? this.createTextCommand(to, steps) : command),
     };
+    return command;
   }
 
   private async undo(): Promise<void> {
@@ -2031,6 +2038,7 @@ export class App implements ShellHostish {
         execute: async () => {
           await this.workspace.rename(path, next);
           this.remapTabs(path, next);
+          this.history.remapKey(path, next);
           this.selectedPath = next;
           this.renderWorkspaceStructure();
           this.log(`Renamed ${path} → ${next}`);
@@ -2038,6 +2046,7 @@ export class App implements ShellHostish {
         undo: async () => {
           await this.workspace.rename(next, path);
           this.remapTabs(next, path);
+          this.history.remapKey(next, path);
           this.selectedPath = path;
           this.renderWorkspaceStructure();
         },
@@ -2364,6 +2373,9 @@ export class App implements ShellHostish {
 
   /** Exports the timeline as a PNG frame sequence inside a ZIP archive. */
   async exportFrames(): Promise<void> {
+    const wasPlaying = this.previewView.isPlaying;
+    const originalPlayhead = this.timelinePlayheadMs;
+    this.previewView.pause();
     try {
       const doc = await this.timelineStore.load();
       const frames = frameSequence(doc, { maxFrames: 60 });
@@ -2395,6 +2407,10 @@ export class App implements ShellHostish {
       toast('Export frames', `${files.length - 1} frame(s) exported.`, 'success', 2600);
     } catch (error) {
       toast('Export frames failed', error instanceof Error ? error.message : String(error), 'error');
+    } finally {
+      this.previewView.setPlayhead(originalPlayhead);
+      this.timeline.seekTo(originalPlayhead);
+      if (wasPlaying) this.previewView.play();
     }
   }
 
@@ -2479,6 +2495,7 @@ export class App implements ShellHostish {
 
   private async loadMusicDocument(): Promise<void> {
     const raw = this.workspace.readFile(App.MUSIC_PATH);
+    this.musicVersion = this.workspace.versionOf(App.MUSIC_PATH);
     if (!raw) return;
     try {
       const parsed: unknown = JSON.parse(raw);
@@ -2494,7 +2511,12 @@ export class App implements ShellHostish {
     if (this.musicSaveTimer !== undefined) window.clearTimeout(this.musicSaveTimer);
     this.musicSaveTimer = window.setTimeout(() => {
       this.musicSaveTimer = undefined;
-      void this.workspace.writeFile(App.MUSIC_PATH, JSON.stringify(clip)).catch(() => undefined);
+      void this.workspace
+        .writeFile(App.MUSIC_PATH, JSON.stringify(clip), this.musicVersion || undefined)
+        .then(() => {
+          this.musicVersion = this.workspace.versionOf(App.MUSIC_PATH);
+        })
+        .catch(() => undefined);
     }, 500);
   }
 

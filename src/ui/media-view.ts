@@ -112,6 +112,14 @@ export class MediaView {
     this.addButton.disabled = false;
 
     const ticket = ++this.sequence;
+    if (sameSource && kind === 'audio' && this.waveform) {
+      void this.peakCache
+        .load(source.path, () => peaksFromBlob(source.blob, 1024))
+        .then((data) => {
+          if (ticket === this.sequence) this.waveform?.setPeaks(data.samples);
+        })
+        .catch(() => undefined);
+    }
     if (!sameSource) {
       this.releaseUrl();
       this.url = URL.createObjectURL(source.blob);
