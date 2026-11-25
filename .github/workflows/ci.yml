@@ -16,3 +16,16 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - name: Browser E2E (preview + both suites)
+        run: |
+          npm run preview -- --port 4173 > /tmp/studio-preview.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:4173/ > /dev/null; then break; fi
+            sleep 1
+          done
+          curl -sf http://localhost:4173/ > /dev/null || { cat /tmp/studio-preview.log; exit 1; }
+          npm run test:e2e
+          npm run test:e2e:multimedia

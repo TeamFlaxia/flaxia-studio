@@ -202,3 +202,291 @@ export function validatePlayFiles(files: PlayFile[]): PlayPayload {
 
   return { entry, files, totalBytes };
 }
+
+/**
+ * Pre-publication compatibility checker.
+ *
+ * Unlike `validatePlayFiles` (which throws on the first problem), this collects
+ * every issue so the IDE can show them all in a Problems panel. Hard Arcade
+ * publish blockers are separated from Test Play-only transfer advice and from
+ * static hints that may be harmless but are risky in the sandboxed frame.
+ */
+
+export type CompatibilityScope = 'arcade' | 'test-play';
+
+export interface CompatibilityIssue {
+  code: string;
+  scope: CompatibilityScope;
+  severity: 'error' | 'warning';
+  path: string | null;
+  message: string;
+}
+
+export interface CompatibilityFile {
+  path: string;
+  content?: string;
+  size?: number;
+  binary?: boolean;
+}
+
+/** Shared note appended to every static hint: opaque origin and no CDN. */
+const COMPATIBILITY_SANDBOX_NOTE =
+  ' Flaxia Arcade forbids CDN dependencies: bundle every asset locally and use same-origin URLs.' +
+  ' The game frame is sandboxed with an opaque origin, so Web Storage and cookies are unavailable.';
+
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** Prefer an explicit size; otherwise measure the UTF-8 text content. */
+function compatibilityFileSize(file: CompatibilityFile): number {
+  if (typeof file.size === 'number' && Number.isFinite(file.size)) {
+    return Math.max(0, file.size);
+  }
+  if (file.content !== undefined) return new TextEncoder().encode(file.content).length;
+  // Binary files with neither a size nor content have no measurable payload;
+  // count them as 0 instead of guessing.
+  return 0;
+}
+
+/** Same control-character rule as the path validator, applied for issue coding. */
+function hasCompatibilityControlCharacter(path: string): boolean {
+  for (const character of path) {
+    if (character.charCodeAt(0) < 32) return true;
+  }
+  return false;
+}
+
+/** Turn the message from `playPathProblem` into a stable, scoping-friendly code. */
+function compatibilityPathCode(problem: string, path: string): string {
+  if (problem.startsWith('Path too long')) return 'path-too-long';
+  if (problem.startsWith('Directory too deep')) return 'path-too-deep';
+  if (problem.startsWith('Path traversal')) return 'path-traversal';
+  if (problem.startsWith('Absolute paths')) return 'absolute-path';
+  if (problem.startsWith('Dotfiles')) return 'dotfile';
+  if (hasCompatibilityControlCharacter(path)) return 'control-character';
+  return 'invalid-path';
+}
+
+/**
+ * Drop `//` lines and C-style block comments before scanning for risky APIs.
+ * This is intentionally simple: string literals are not parsed, but the common
+ * commented-out-code case no longer produces noisy warnings.
+ */
+function stripCompatibilityComments(source: string): string {
+  const kept: string[] = [];
+  let inBlock = false;
+  for (const line of source.split(/\r?\n/)) {
+    let current = line;
+    if (inBlock) {
+      const end = current.indexOf('*/');
+      if (end < 0) {
+        kept.push('');
+        continue;
+      }
+      current = current.slice(end + 2);
+      inBlock = false;
+    }
+    let start = current.indexOf('/*');
+    while (start >= 0) {
+      const end = current.indexOf('*/', start + 2);
+      if (end < 0) {
+        current = current.slice(0, start);
+        inBlock = true;
+        break;
+      }
+      current = current.slice(0, start) + current.slice(end + 2);
+      start = current.indexOf('/*');
+    }
+    if (current.trimStart().startsWith('//')) {
+      kept.push('');
+      continue;
+    }
+    kept.push(current);
+  }
+  return kept.join('\n');
+}
+
+const BARE_IMPORT_PATTERNS = [
+  /^\s*(?:import|export)\s+[^'"\n]*?\bfrom\s*['"]([^'"]+)['"]/gm,
+  /^\s*import\s*['"]([^'"]+)['"]/gm,
+];
+
+/** Module specifiers that need a bundler/resolver, which the archive has none of. */
+function bareSpecifiers(source: string): string[] {
+  const found = new Set<string>();
+  for (const pattern of BARE_IMPORT_PATTERNS) {
+    pattern.lastIndex = 0;
+    for (let match = pattern.exec(source); match !== null; match = pattern.exec(source)) {
+      const specifier = match[1] ?? '';
+      if (specifier.startsWith('.') || specifier.startsWith('/')) continue;
+      if (/^[a-z][a-z0-9+.-]*:/i.test(specifier)) continue; // URL or node: scheme
+      found.add(specifier);
+    }
+  }
+  return [...found];
+}
+
+/**
+ * All Arcade/Test Play compatibility problems in a candidate Web project.
+ *
+ * Counts and sizes reuse the Play limits, so a clean result here means the
+ * same files also pass `validatePlayFiles`. Static hints are warnings only:
+ * they flag sandbox-hostile APIs and unresolved imports for the author to
+ * review, not malformed archives.
+ */
+export function checkArcadeCompatibility(files: readonly CompatibilityFile[]): CompatibilityIssue[] {
+  const issues: CompatibilityIssue[] = [];
+  const add = (
+    code: string,
+    scope: CompatibilityScope,
+    severity: CompatibilityIssue['severity'],
+    path: string | null,
+    message: string,
+  ): void => {
+    issues.push({ code, scope, severity, path, message });
+  };
+
+  for (const file of files) {
+    const path = file.path;
+    const problem = playPathProblem(path);
+    if (problem !== null) {
+      add(compatibilityPathCode(problem, path), 'arcade', 'error', path, problem);
+    }
+    if (path.toLowerCase().endsWith('.zip')) {
+      add('nested-zip', 'arcade', 'error', path, `Nested ZIP files are not allowed: ${path}`);
+    } else if (mimeForPath(path) === null) {
+      add(
+        'disallowed-extension',
+        'arcade',
+        'error',
+        path,
+        `File type not allowed by the Arcade allowlist: ${path}`,
+      );
+    }
+  }
+
+  if (files.length > PLAY_MAX_FILE_COUNT) {
+    add(
+      'too-many-files',
+      'arcade',
+      'error',
+      null,
+      `Too many files (${files.length}); the Arcade limit is ${PLAY_MAX_FILE_COUNT}.`,
+    );
+  }
+
+  let totalBytes = 0;
+  for (const file of files) totalBytes += compatibilityFileSize(file);
+
+  if (totalBytes > PLAY_MAX_TOTAL_BYTES) {
+    add(
+      'extracted-too-large',
+      'arcade',
+      'error',
+      null,
+      `Extracted size too large (${totalBytes} bytes; max ${PLAY_MAX_TOTAL_BYTES} bytes).`,
+    );
+  }
+  if (totalBytes > PLAY_MAX_TRANSFER_BYTES) {
+    add(
+      'transfer-too-large',
+      'test-play',
+      'warning',
+      null,
+      `Payload exceeds the Test Play transfer cap of ${PLAY_MAX_TRANSFER_BYTES / (1024 * 1024)}MB ` +
+        `(${totalBytes} bytes). This cap is specific to Test Play; Flaxia Arcade has no transfer cap.`,
+    );
+  }
+
+  const entry = pickEntryPoint(files.map((file) => file.path));
+  if (entry === null) {
+    add(
+      'missing-entry',
+      'arcade',
+      'error',
+      null,
+      'index.html not found; a published game needs an entry document.',
+    );
+  } else if (!entry.toLowerCase().endsWith('.html')) {
+    add(
+      'entry-not-html',
+      'arcade',
+      'warning',
+      entry,
+      `Entry point ${entry} is not index.html; rename it for Arcade.`,
+    );
+  }
+
+  for (const file of files) {
+    if (file.binary === true || file.content === undefined) continue;
+    const source = stripCompatibilityComments(file.content);
+    if (/\blocalStorage\b/.test(source)) {
+      add(
+        'local-storage',
+        'arcade',
+        'warning',
+        file.path,
+        `localStorage is unavailable in the opaque game frame.${COMPATIBILITY_SANDBOX_NOTE}`,
+      );
+    }
+    if (/\bdocument\s*\.\s*cookie\b/.test(source)) {
+      add(
+        'document-cookie',
+        'arcade',
+        'warning',
+        file.path,
+        `document.cookie is unavailable in the opaque game frame.${COMPATIBILITY_SANDBOX_NOTE}`,
+      );
+    }
+    if (/new\s+(?:Shared)?Worker\s*\(/.test(source)) {
+      add(
+        'worker',
+        'arcade',
+        'warning',
+        file.path,
+        'new Worker() requires a same-origin script URL; cross-origin and CDN workers are blocked.' +
+          COMPATIBILITY_SANDBOX_NOTE,
+      );
+    }
+    if (/\bimport\s*\(/.test(source)) {
+      add(
+        'dynamic-import',
+        'arcade',
+        'warning',
+        file.path,
+        'Dynamic import() cannot resolve remote/CDN modules in the sandbox; bundle every chunk locally.' +
+          COMPATIBILITY_SANDBOX_NOTE,
+      );
+    }
+    for (const specifier of bareSpecifiers(source)) {
+      add(
+        'bare-import',
+        'arcade',
+        'warning',
+        file.path,
+        `Bare module specifier "${specifier}" has no resolver in the published archive; ` +
+          'use a relative path to a bundled local file.' +
+          COMPATIBILITY_SANDBOX_NOTE,
+      );
+    }
+  }
+
+  // The Problems panel renders this directly: no duplicates, stable order.
+  const seen = new Set<string>();
+  const unique = issues.filter((issue) => {
+    const key = [issue.code, issue.scope, issue.path ?? '', issue.severity, issue.message].join('\u0000');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  unique.sort(
+    (a, b) =>
+      compareText(a.code, b.code) ||
+      compareText(a.scope, b.scope) ||
+      compareText(a.path ?? '', b.path ?? '') ||
+      compareText(a.severity, b.severity) ||
+      compareText(a.message, b.message),
+  );
+  return unique;
+}

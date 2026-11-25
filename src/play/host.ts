@@ -14,7 +14,12 @@ import {
   PLAY_LOAD_TIMEOUT_MS,
   type PlayPayload,
 } from './policy.ts';
-import { isPlayShellMessage, type PlayHostMessage, type PlayShellMessage } from './protocol.ts';
+import {
+  isPlayShellMessage,
+  type PlayConsoleEntry,
+  type PlayHostMessage,
+  type PlayShellMessage,
+} from './protocol.ts';
 import { readPreviewStorage, writePreviewStorage } from './storage.ts';
 
 export type PlayStatus = 'idle' | 'loading' | 'running' | 'error';
@@ -43,6 +48,8 @@ export class PlayHost {
     private readonly onStatusChange: (status: PlayStatus, detail?: string) => void,
     /** Storage namespace — one preview save per workspace. */
     private readonly storageNamespace: string,
+    /** Receives console output and uncaught errors from the sandboxed game. */
+    private readonly onConsoleEntry?: (entry: PlayConsoleEntry) => void,
   ) {
     window.addEventListener('message', this.handleMessage);
   }
@@ -201,6 +208,7 @@ export class PlayHost {
     if (message.type === 'play:storage-write') {
       writePreviewStorage(this.storageNamespace, message.operation, message.key, message.value);
     }
+    if (message.type === 'play:console') this.onConsoleEntry?.(message.entry);
     for (const waiter of [...this.waiters]) {
       if (!waiter.match(message)) continue;
       const index = this.waiters.indexOf(waiter);

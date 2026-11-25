@@ -204,6 +204,12 @@ window.addEventListener('message', (event: MessageEvent) => {
     });
     return;
   }
+  // Console/error diagnostics travel up to the studio Output panel. They are
+  // informational and must not settle a pending handshake waiter.
+  if (event.data.type === 'play:runtime-console') {
+    post({ type: 'play:console', entry: event.data.entry });
+    return;
+  }
   for (const waiter of [...runtimeWaiters]) {
     if (!waiter.match(event.data)) continue;
     const index = runtimeWaiters.indexOf(waiter);

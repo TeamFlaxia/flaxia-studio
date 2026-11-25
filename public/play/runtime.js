@@ -25,8 +25,11 @@
 (() => {
   const PLACEHOLDER = /blob:flaxia-play\/([^"'()\s]+)/g;
   const ARCHIVE_ORIGIN = 'https://zip.invalid/';
+  const MAX_CONSOLE_MESSAGE = 500;
+  const MAX_CONSOLE_LINE = 1000000;
 
   let files = new Map();
+  let consoleWrapped = false;
   let texts = {};
   let storage = {};
   const blobs = new Map();
@@ -130,6 +133,94 @@
       }
       return original(input, init);
     };
+  };
+
+  const formatConsoleArg = (value) => {
+    if (typeof value === 'string') return value;
+    if (value instanceof Error) return value.stack || value.message;
+    if (typeof value === 'undefined') return 'undefined';
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  };
+
+  /** Maps a blob/archive URL back to the payload path it was created from. */
+  const sourceOf = (value) => {
+    if (typeof value !== 'string' || !value) return entry || null;
+    if (value.startsWith('blob:')) {
+      for (const [path, url] of blobs) if (url === value) return path;
+      return entry || null;
+    }
+    if (value.indexOf('/play/runtime.html') >= 0) return entry || null;
+    try {
+      const url = new URL(value, ARCHIVE_ORIGIN);
+      if (url.origin === ARCHIVE_ORIGIN.replace(/\/$/, '')) {
+        return decodeURIComponent(url.pathname.slice(1));
+      }
+    } catch {
+      // Not an archive-relative URL.
+    }
+    return value.slice(0, 255);
+  };
+
+  /**
+   * Bridges the game's console and uncaught errors to the studio Output panel.
+   *
+   * `document.open()` removes every window listener, so this must be called
+   * again after opening the game document and before writing it. Console
+   * methods live on `window` and only need wrapping once.
+   */
+  const installDiagnostics = () => {
+    const relay = (level, message, source, line, column) => {
+      const mapped = sourceOf(source);
+      const record = { level, message: String(message).slice(0, MAX_CONSOLE_MESSAGE) };
+      if (mapped) record.source = String(mapped).slice(0, 255);
+      if (Number.isFinite(line) && line > 0) record.line = Math.min(line, MAX_CONSOLE_LINE);
+      if (Number.isFinite(column) && column > 0) record.column = Math.min(column, MAX_CONSOLE_LINE);
+      try {
+        window.parent.postMessage({ type: 'play:runtime-console', entry: record }, '*');
+      } catch {
+        // The frame may already be detached.
+      }
+    };
+
+    window.addEventListener(
+      'error',
+      (event) => {
+        if (event.message) {
+          relay('error', event.message, event.filename, event.lineno, event.colno);
+          return;
+        }
+        const target = event.target;
+        if (target && target !== window) {
+          const url = target.src || target.href || 'resource';
+          relay('error', `Failed to load ${url}`, url);
+        }
+      },
+      true,
+    );
+
+    window.addEventListener('unhandledrejection', (event) => {
+      const reason = event.reason;
+      relay('error', reason?.message ? reason.message : String(reason));
+    });
+
+    if (consoleWrapped) return;
+    consoleWrapped = true;
+    for (const level of ['log', 'info', 'warn', 'error']) {
+      const original = console[level];
+      if (typeof original !== 'function') continue;
+      console[level] = (...args) => {
+        try {
+          relay(level, args.map(formatConsoleArg).join(' '));
+        } catch {
+          // Never break the game because diagnostics failed.
+        }
+        original.apply(console, args);
+      };
+    }
   };
 
   /** Relays a storage write to the studio through the shell. */
@@ -261,6 +352,9 @@
 
     const html = sanitizeDocument(substitute(rawText(entry)));
     document.open();
+    // document.open() removes window listeners; reinstall before the game's
+    // scripts run so their first error is still captured.
+    installDiagnostics();
     document.write(html);
     document.close();
     window.parent.postMessage({ type: 'play:runtime-started' }, '*');
@@ -278,5 +372,6 @@
 
   window.addEventListener('pagehide', () => revokeBlobs());
 
+  installDiagnostics();
   window.parent.postMessage({ type: 'play:runtime-ready' }, '*');
 })();

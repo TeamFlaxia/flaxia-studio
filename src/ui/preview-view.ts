@@ -14,7 +14,15 @@ import type { Workspace } from '../fs/workspace.ts';
 import { el, iconButton } from '../lib/dom';
 import { icon } from '../lib/icons';
 import { DEFAULT_MEDIA_ADJUSTMENTS, type MediaAdjustments, mediaKind } from '../lib/media';
-import { type Clip, clipEnd, formatTimecode, type TimelineDoc, timelineDuration } from '../lib/timeline';
+import {
+  type Clip,
+  clipEnd,
+  formatTimecode,
+  isAudibleTrack,
+  type TimelineDoc,
+  type Track,
+  timelineDuration,
+} from '../lib/timeline';
 
 export interface PreviewViewOptions {
   workspace: Workspace;
@@ -173,6 +181,10 @@ export class PreviewView {
     }
   }
 
+  get isPlaying(): boolean {
+    return this.playing;
+  }
+
   /** Moves the monitor, e.g. when the timeline playhead is scrubbed. */
   setPlayhead(ms: number): void {
     const duration = this.doc ? timelineDuration(this.doc) : 0;
@@ -184,6 +196,74 @@ export class PreviewView {
       this.syncPlayback(this.playing);
     }
     this.updateTransport();
+  }
+
+  /**
+   * Renders one timeline frame and returns it as a PNG blob.
+   * Used by the frame-sequence exporter; the monitor need not be visible.
+   */
+  async captureFrame(ms: number): Promise<Blob | null> {
+    const doc = this.doc;
+    if (!doc || this.disposed) return null;
+    const duration = timelineDuration(doc);
+    this.playheadMs = Math.max(0, Math.min(duration, Math.round(ms)));
+    this.pause();
+
+    // Make sure every visual clip at this instant is decoded and seeked before
+    // the canvas is sampled. Otherwise the first frames are black and videos
+    // show the previously decoded frame.
+    const clips: Clip[] = [];
+    for (const track of doc.tracks) {
+      if (track.kind !== 'video') continue;
+      const clip = activeClip(track.clips, this.playheadMs);
+      if (clip && (mediaKind(clip.path) === 'image' || mediaKind(clip.path) === 'video')) clips.push(clip);
+    }
+    await Promise.all(
+      clips.map(async (clip) => {
+        if (!this.blobUrls.has(clip.path)) await this.loadUrl(clip.path);
+        if (!this.blobUrls.has(clip.path)) return;
+        if (mediaKind(clip.path) === 'image') {
+          let image = this.images.get(clip.path);
+          if (!image) {
+            this.prepareImage(clip.path);
+            image = this.images.get(clip.path) ?? undefined;
+          }
+          if (image && !image.complete) {
+            await new Promise<void>((resolve) => {
+              image?.addEventListener('load', () => resolve(), { once: true });
+              image?.addEventListener('error', () => resolve(), { once: true });
+            });
+          }
+          if (image?.decode) await image.decode().catch(() => undefined);
+          return;
+        }
+        let element = this.elements.get(clip.id);
+        if (!element) element = this.ensureMedia(clip, 'video') ?? undefined;
+        if (!(element instanceof HTMLVideoElement)) return;
+        const video = element;
+        video.pause();
+        if (video.readyState < 2) {
+          await new Promise<void>((resolve) => {
+            video.addEventListener('loadeddata', () => resolve(), { once: true });
+            video.addEventListener('error', () => resolve(), { once: true });
+          });
+        }
+        const target = clipTarget(clip, this.playheadMs);
+        if (Math.abs(video.currentTime - target) > 0.02) {
+          await new Promise<void>((resolve) => {
+            video.addEventListener('seeked', () => resolve(), { once: true });
+            try {
+              video.currentTime = target;
+            } catch {
+              resolve();
+            }
+          });
+        }
+      }),
+    );
+
+    this.renderFrame(true);
+    return new Promise<Blob | null>((resolve) => this.canvas.toBlob(resolve, 'image/png'));
   }
 
   /** Re-composites after adjustments change. */
@@ -326,8 +406,8 @@ export class PreviewView {
   // ------------------------------------------------------------
   // Compositing
   // ------------------------------------------------------------
-  private renderFrame(): void {
-    if (this.disposed || (!this.active && !this.playing)) return;
+  private renderFrame(force = false): void {
+    if (this.disposed || (!force && !this.active && !this.playing)) return;
     const ctx = this.ctx;
     const width = this.canvas.width;
     const height = this.canvas.height;
@@ -365,7 +445,7 @@ export class PreviewView {
   }
 
   private drawClip(node: HTMLImageElement | HTMLVideoElement, clip: Clip): void {
-    const adjustments = this.doc?.adjustments[clip.path] ?? DEFAULT_MEDIA_ADJUSTMENTS;
+    const adjustments = clip.adjustments ?? this.doc?.adjustments[clip.path] ?? DEFAULT_MEDIA_ADJUSTMENTS;
     const sourceWidth = node instanceof HTMLVideoElement ? node.videoWidth : node.naturalWidth;
     const sourceHeight = node instanceof HTMLVideoElement ? node.videoHeight : node.naturalHeight;
     if (!sourceWidth || !sourceHeight) return;
@@ -445,7 +525,7 @@ export class PreviewView {
       } catch {
         // Metadata is not ready yet; the loadedmetadata handler retries.
       }
-      if (this.playing) void element.play().catch(() => undefined);
+      // Playback is started only by syncPlayback(), which honours mute/solo.
     };
     if (element.readyState >= 1) apply();
     else element.addEventListener('loadedmetadata', apply, { once: true });
@@ -467,12 +547,13 @@ export class PreviewView {
     if (!this.active && !playing) return;
     const doc = this.doc;
     if (!doc) return;
-    const active = new Map<string, { clip: Clip; kind: 'video' | 'audio' }>();
+    const active = new Map<string, { clip: Clip; kind: 'video' | 'audio'; track: Track }>();
     for (const track of doc.tracks) {
+      if (!isAudibleTrack(doc, track.id)) continue;
       for (const clip of track.clips) {
         if (clip.startMs <= this.playheadMs && this.playheadMs < clipEnd(clip)) {
           const kind = mediaKind(clip.path);
-          if (kind === 'video' || kind === 'audio') active.set(clip.id, { clip, kind });
+          if (kind === 'video' || kind === 'audio') active.set(clip.id, { clip, kind, track });
         }
       }
     }
@@ -485,6 +566,12 @@ export class PreviewView {
     for (const [id, { clip, kind }] of active) {
       const element = this.elements.get(id) ?? this.ensureMedia(clip, kind);
       if (!element) continue;
+      let gain = clip.gain ?? 1;
+      const elapsed = this.playheadMs - clip.startMs;
+      if (clip.fadeInMs && elapsed < clip.fadeInMs) gain *= Math.max(0, elapsed / clip.fadeInMs);
+      const remaining = clipEnd(clip) - this.playheadMs;
+      if (clip.fadeOutMs && remaining < clip.fadeOutMs) gain *= Math.max(0, remaining / clip.fadeOutMs);
+      element.volume = Math.min(1, Math.max(0, gain));
       const target = clipTarget(clip, this.playheadMs);
       const drift = Math.abs(element.currentTime - target);
       if (drift > (playing ? 0.3 : 0.05)) {

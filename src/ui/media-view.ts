@@ -15,6 +15,8 @@ import {
   mediaKind,
   probeMedia,
 } from '../lib/media';
+import { PeakCache, peaksFromBlob } from '../lib/peaks';
+import { WaveformView } from './waveform';
 
 export interface MediaSource {
   path: string;
@@ -42,6 +44,8 @@ export class MediaView {
   private currentKind: MediaKind | null = null;
   private adjustments: MediaAdjustments = { ...DEFAULT_MEDIA_ADJUSTMENTS };
   private media: HTMLImageElement | HTMLVideoElement | null = null;
+  private waveform: WaveformView | null = null;
+  private readonly peakCache = new PeakCache();
   private url: string | null = null;
   private probe: { durationMs: number; width: number; height: number } | null = null;
   private sequence = 0;
@@ -107,14 +111,23 @@ export class MediaView {
     this.headIcon.replaceChildren(icon(fileIcon(source.path), 13));
     this.addButton.disabled = false;
 
+    const ticket = ++this.sequence;
+    if (sameSource && kind === 'audio' && this.waveform) {
+      void this.peakCache
+        .load(source.path, () => peaksFromBlob(source.blob, 1024))
+        .then((data) => {
+          if (ticket === this.sequence) this.waveform?.setPeaks(data.samples);
+        })
+        .catch(() => undefined);
+    }
     if (!sameSource) {
       this.releaseUrl();
       this.url = URL.createObjectURL(source.blob);
       this.stage.replaceChildren();
       this.media = this.buildMedia(kind, this.url);
       if (this.media) this.stage.appendChild(this.media);
+      if (kind === 'audio') this.mountWaveform(source, ticket);
       this.probe = null;
-      const ticket = ++this.sequence;
       void probeMedia(source.blob, kind).then((probe) => {
         if (ticket !== this.sequence) return;
         this.probe = probe;
@@ -130,6 +143,7 @@ export class MediaView {
     this.sequence += 1;
     this.releaseUrl();
     this.media = null;
+    this.waveform = null;
     this.currentPath = null;
     this.currentKind = null;
     this.probe = null;
@@ -167,6 +181,27 @@ export class MediaView {
     return null;
   }
 
+  private mountWaveform(source: MediaSource, ticket: number): void {
+    this.waveform = new WaveformView();
+    this.stage.appendChild(this.waveform.host);
+    const width = Math.max(320, this.stage.clientWidth || 640);
+    this.waveform.resize(width, 48);
+    void this.peakCache
+      .load(source.path, () => peaksFromBlob(source.blob, 1024))
+      .then((data) => {
+        if (ticket !== this.sequence || !this.waveform) return;
+        this.waveform.setPeaks(data.samples);
+        const audio = this.stage.querySelector('audio');
+        audio?.addEventListener('timeupdate', () => {
+          const duration = audio.duration || data.durationMs / 1000;
+          this.waveform?.setProgress(duration > 0 ? audio.currentTime / duration : 0);
+        });
+      })
+      .catch(() => {
+        // A missing decoder leaves the audio controls usable.
+      });
+  }
+
   private renderMeta(size: number, mime: string): void {
     const parts = [formatBytes(size)];
     if (mime) parts.push(mime);
@@ -202,7 +237,10 @@ export class MediaView {
   private releaseUrl(): void {
     if (this.url) URL.revokeObjectURL(this.url);
     this.url = null;
-    if (this.currentKind === 'audio') this.stage.replaceChildren();
+    if (this.currentKind === 'audio') {
+      this.stage.replaceChildren();
+      this.waveform = null;
+    }
   }
 }
 

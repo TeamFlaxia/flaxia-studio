@@ -41,8 +41,10 @@ export interface CursorPosition {
   selected: number;
 }
 
+export type EditorChangeOrigin = 'user' | 'history';
+
 export interface EditorCallbacks {
-  onChange(path: string): void;
+  onChange(path: string, origin: EditorChangeOrigin): void;
   onCursor(position: CursorPosition): void;
   onFocus(): void;
 }
@@ -152,7 +154,7 @@ export class EditorManager {
       }
       model.onDidChangeContent(() => {
         if (this.suppressChange) return;
-        this.callbacks?.onChange(path);
+        this.callbacks?.onChange(path, 'user');
       });
     }
 
@@ -168,8 +170,44 @@ export class EditorManager {
     if (!model || model.getValue() === content) return;
     this.suppressChange = true;
     model.setValue(content);
+    if (this.activePath === path) this.editor?.pushUndoStop();
     this.suppressChange = false;
     this.savedVersions.set(path, model.getAlternativeVersionId());
+  }
+
+  /**
+   * Inserts an undo boundary after a user edit. The app history records one
+   * token per edit and replays it with `undoSteps`/`redoSteps`.
+   */
+  pushUndoStop(path: string): void {
+    if (this.activePath === path) this.editor?.pushUndoStop();
+  }
+
+  async undoSteps(path: string, steps: number): Promise<void> {
+    await this.replaySteps(path, steps, 'undo');
+  }
+
+  async redoSteps(path: string, steps: number): Promise<void> {
+    await this.replaySteps(path, steps, 'redo');
+  }
+
+  private async replaySteps(path: string, steps: number, direction: 'undo' | 'redo'): Promise<void> {
+    const model = this.models.get(path);
+    if (!model) {
+      this.callbacks?.onChange(path, 'history');
+      return;
+    }
+    this.suppressChange = true;
+    try {
+      for (let index = 0; index < steps; index += 1) {
+        if (direction === 'undo' ? !model.canUndo() : !model.canRedo()) break;
+        if (direction === 'undo') await model.undo();
+        else await model.redo();
+      }
+    } finally {
+      this.suppressChange = false;
+      this.callbacks?.onChange(path, 'history');
+    }
   }
 
   markSaved(path: string): void {

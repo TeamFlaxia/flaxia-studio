@@ -1,11 +1,13 @@
 export const DB_NAME = 'flaxia-studio';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 
 export interface WorkspaceRecord {
   id: string;
   name: string;
   createdAt: number;
   updatedAt: number;
+  /** Bumped on every persisted change; used by cross-tab change notifications. */
+  rev: number;
 }
 
 export interface FileRecord {
@@ -22,6 +24,8 @@ export interface FileRecord {
   size?: number;
   mime?: string;
   updatedAt: number;
+  /** Per-file optimistic-lock version, starting at 1. */
+  version: number;
 }
 
 /** A binary payload stored as-is, so video and audio never inflate to base64. */
@@ -33,12 +37,32 @@ export interface BlobRecord {
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
+/**
+ * Fill missing fields inside an upgrade transaction using plain IDB calls.
+ * Using raw requests (instead of promise helpers) keeps this compatible with
+ * fake-indexeddb, where the versionchange transaction closes as soon as the
+ * upgrade callback's microtask queue drains.
+ */
+function migrateMissingField<T>(
+  request: IDBRequest<T[]>,
+  store: IDBObjectStore,
+  complete: (record: T) => T | null,
+): void {
+  request.onsuccess = () => {
+    for (const record of request.result ?? []) {
+      const migrated = complete(record);
+      if (migrated !== null) store.put(migrated);
+    }
+  };
+}
+
 export function openDatabase(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event) => {
       const db = request.result;
+      const tx = request.transaction;
       if (!db.objectStoreNames.contains('workspaces')) {
         db.createObjectStore('workspaces', { keyPath: 'id' });
       }
@@ -54,10 +78,30 @@ export function openDatabase(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains('blobs')) {
         db.createObjectStore('blobs', { keyPath: 'id' });
       }
+      // v3: optimistic-revision fields. Old records get the default value 1.
+      if (event.oldVersion < 3 && tx) {
+        const workspaces = tx.objectStore('workspaces');
+        migrateMissingField(
+          workspaces.getAll() as IDBRequest<Array<Partial<WorkspaceRecord>>>,
+          workspaces,
+          (record) => (record.rev === undefined ? { ...record, rev: 1 } : null),
+        );
+        const files = tx.objectStore('files');
+        migrateMissingField(files.getAll() as IDBRequest<Array<Partial<FileRecord>>>, files, (record) =>
+          record.version === undefined ? { ...record, version: 1 } : null,
+        );
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error('Failed to open IndexedDB'));
-    request.onblocked = () => reject(new Error('IndexedDB upgrade is blocked by another tab.'));
+    request.onblocked = () => {
+      // `onblocked` is not final: once the other tab closes, `onsuccess` still
+      // arrives. Keep the connection retryable instead of caching a rejection.
+      dbPromise = null;
+      reject(
+        new Error('IndexedDB upgrade is blocked by another tab. Close other Flaxia Studio tabs and retry.'),
+      );
+    };
   });
   return dbPromise;
 }
@@ -112,6 +156,61 @@ export async function putFiles(records: FileRecord[]): Promise<void> {
   await transactionDone(tx);
 }
 
+/** Reads one file record by its workspace-scoped id (O(1) lookup). */
+export async function getFile(workspaceId: string, path: string): Promise<FileRecord | undefined> {
+  const db = await openDatabase();
+  const tx = db.transaction('files', 'readonly');
+  return requestToPromise(tx.objectStore('files').get(`${workspaceId}:${path}`));
+}
+
+/**
+ * Atomically checks the persisted version and writes the next one in a single
+ * readwrite transaction. This closes the check/write race between tabs that a
+ * separate `get` + `put` would leave open.
+ */
+export async function putFileVersioned(
+  workspaceId: string,
+  path: string,
+  expected: number | undefined,
+  build: (nextVersion: number) => FileRecord,
+): Promise<{ ok: boolean; version: number }> {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('files', 'readwrite');
+    const store = tx.objectStore('files');
+    let version = 0;
+    let settled = false;
+    const request = store.get(`${workspaceId}:${path}`);
+    request.onsuccess = () => {
+      const current = request.result as FileRecord | undefined;
+      if (expected !== undefined && (current?.version ?? 0) !== expected) {
+        version = current?.version ?? 0;
+        settled = true;
+        tx.abort();
+        resolve({ ok: false, version });
+        return;
+      }
+      version = (current?.version ?? 0) + 1;
+      store.put(build(version));
+    };
+    tx.oncomplete = () => {
+      if (settled) return;
+      settled = true;
+      resolve({ ok: true, version });
+    };
+    tx.onerror = () => {
+      if (settled) return;
+      settled = true;
+      reject(tx.error ?? new Error('IndexedDB file write failed.'));
+    };
+    tx.onabort = () => {
+      if (settled) return;
+      settled = true;
+      reject(tx.error ?? new Error('IndexedDB file write was aborted.'));
+    };
+  });
+}
+
 export async function deleteFiles(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   const db = await openDatabase();
@@ -155,4 +254,15 @@ export async function kvSet<T>(key: string, value: T): Promise<void> {
   const tx = db.transaction('kv', 'readwrite');
   tx.objectStore('kv').put({ key, value });
   await transactionDone(tx);
+}
+
+const ACTIVE_WORKSPACE_ID_KEY = 'activeWorkspaceId';
+
+/** The workspace the studio should reopen on the next launch. */
+export function getActiveWorkspaceId(): Promise<string | undefined> {
+  return kvGet<string>(ACTIVE_WORKSPACE_ID_KEY);
+}
+
+export function setActiveWorkspaceId(id: string): Promise<void> {
+  return kvSet(ACTIVE_WORKSPACE_ID_KEY, id);
 }
