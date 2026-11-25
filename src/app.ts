@@ -36,6 +36,7 @@ import {
   probeMedia,
   trackKindFor,
 } from './lib/media';
+import type { NoteClip } from './lib/music';
 import { bindDragHandle, bindSeparatorKeys } from './lib/resize';
 import { loadSettings, type Settings, saveSettings } from './lib/settings';
 import { matchesShortcut, modShortcut } from './lib/shortcut';
@@ -44,11 +45,21 @@ import {
   addClip,
   addTrack,
   clipEnd,
+  DEFAULT_TEMPO,
   type MediaAsset,
   MIN_CLIP_MS,
   setAdjustments,
+  setTempo,
+  type TimelineDoc,
   trackEnd,
 } from './lib/timeline';
+import {
+  buildFrameZip,
+  frameFileName,
+  frameIndexAt,
+  frameSequence,
+  manifestForFrames,
+} from './lib/video-export';
 import { LinuxRuntime, type LinuxStatus } from './linux/runtime';
 import { PlayHost, type PlayStatus, PlayStopped } from './play/host';
 import {
@@ -65,6 +76,7 @@ import { showContextMenu } from './ui/context-menu';
 import { confirmDialog, openDialog, promptDialog } from './ui/dialog';
 import { InspectorView } from './ui/inspector';
 import { MediaView } from './ui/media-view';
+import { MusicPanel } from './ui/music-panel';
 import { isPaletteOpen, openPalette, type PaletteItem } from './ui/palette';
 import { PreviewView } from './ui/preview-view';
 import { TimelineStore } from './ui/timeline-store';
@@ -134,6 +146,9 @@ export class App implements ShellHostish {
   private inspectorResizer!: HTMLElement;
   private inspectorButton!: HTMLButtonElement;
   private previewPane!: HTMLElement;
+  private musicPane!: HTMLElement;
+  private musicPanel: MusicPanel;
+  private musicSaveTimer: number | undefined;
   private mediaView: MediaView;
   private inspector: InspectorView;
   private timelineStore: TimelineStore;
@@ -180,7 +195,7 @@ export class App implements ShellHostish {
   private warnedApkCors = false;
   private lastLinuxStatus: LinuxStatus;
   private linuxUnsubscribe: (() => void) | null = null;
-  private activeView: 'editor' | 'play' | 'media' | 'preview' = 'editor';
+  private activeView: 'editor' | 'play' | 'media' | 'preview' | 'music' = 'editor';
   private timelinePlayheadMs = 0;
   private playHasRun = false;
   private playStatusState: PlayStatus = 'idle';
@@ -204,7 +219,11 @@ export class App implements ShellHostish {
       this.workspace.id,
       (entry) => this.handlePlayConsole(entry),
     );
-    this.timelineStore = new TimelineStore(this.workspace, () => this.handleTimelineChange());
+    this.timelineStore = new TimelineStore(
+      this.workspace,
+      () => this.handleTimelineChange(),
+      (previous, next, label) => this.recordTimelineChange(previous, next, label),
+    );
     this.mediaView = new MediaView({
       onAddToTimeline: (path) => void this.addMediaToTimeline(path),
     });
@@ -242,6 +261,12 @@ export class App implements ShellHostish {
       onAddFile: (startMs, trackId) => this.pickTimelineFile(startMs, trackId),
       onDropFile: (path, startMs, trackId) => void this.dropFileOnTimeline(path, startMs, trackId),
       onDropFiles: (files, startMs, trackId) => void this.addDroppedFilesToTimeline(files, startMs, trackId),
+    });
+    this.musicPanel = new MusicPanel({
+      onTempoChange: (tempo) => {
+        this.timelineStore.updateWith((doc) => setTempo(doc, tempo), 'Change tempo');
+      },
+      onClipChange: (clip) => this.scheduleMusicSave(clip),
     });
     this.inspector = new InspectorView({
       onAdjustmentsChange: (path, adjustments) => {
@@ -286,7 +311,9 @@ export class App implements ShellHostish {
     this.playHost.mount(this.playBody);
     void this.timeline.init().then(() => {
       this.previewView.setDoc(this.timelineStore.current);
+      this.musicPanel.setTempo(this.timelineStore.current?.tempo ?? DEFAULT_TEMPO);
     });
+    void this.loadMusicDocument();
     this.shell.mount();
     this.shell.setTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
     this.linuxUnsubscribe = this.linux.subscribe((status) => this.handleLinuxStatus(status));
@@ -324,6 +351,13 @@ export class App implements ShellHostish {
     });
     window.addEventListener('pagehide', () => {
       void this.flushSaves({ suppressDialogs: true });
+      if (this.musicSaveTimer !== undefined) {
+        window.clearTimeout(this.musicSaveTimer);
+        this.musicSaveTimer = undefined;
+        void this.workspace
+          .writeFile(App.MUSIC_PATH, JSON.stringify(this.musicPanel.getClip()))
+          .catch(() => undefined);
+      }
       this.workspaceChannel?.close();
       this.workspace.setChangeNotifier(null);
       this.timeline.dispose();
@@ -394,11 +428,13 @@ export class App implements ShellHostish {
     this.playPane.append(this.playHead, this.playBody);
     this.mediaPane = el('div', { class: 'media-pane hidden' }, [this.mediaView.host]);
     this.previewPane = el('div', { class: 'preview-pane hidden' }, [this.previewView.host]);
+    this.musicPane = el('div', { class: 'music-pane hidden' }, [this.musicPanel.host]);
     this.editorMain = el('div', { class: 'editor-main' }, [
       this.editorColumn,
       this.mediaPane,
       this.playPane,
       this.previewPane,
+      this.musicPane,
     ]);
     this.editorArea = el('main', { class: 'editor-area' }, [this.tabsBar, this.breadcrumbs, this.editorMain]);
 
@@ -1055,6 +1091,7 @@ export class App implements ShellHostish {
       );
       this.tabsBar.appendChild(tab);
     }
+    this.tabsBar.appendChild(this.buildMusicTab());
     this.tabsBar.appendChild(this.buildPreviewTab());
     this.tabsBar.appendChild(this.buildPlayTab());
     this.tabsBar.appendChild(el('div', { class: 'tab-spacer' }));
@@ -1086,6 +1123,28 @@ export class App implements ShellHostish {
       [
         el('span', { class: 'tab-icon' }, [icon('monitor', 14)]),
         el('span', { class: 'tab-label', text: 'Preview' }),
+      ],
+    );
+  }
+
+  private buildMusicTab(): HTMLElement {
+    const active = this.activeView === 'music';
+    return el(
+      'div',
+      {
+        class: `tab tab-music ${active ? 'is-active' : ''}`.trim(),
+        role: 'tab',
+        attrs: { 'aria-selected': String(active), tabindex: active ? '0' : '-1', title: 'Music editor' },
+        on: {
+          click: () => this.setActiveView('music'),
+          keydown: (event) => {
+            if (event.key === 'Enter' || event.key === ' ') this.setActiveView('music');
+          },
+        },
+      },
+      [
+        el('span', { class: 'tab-icon' }, [icon('file-audio', 14)]),
+        el('span', { class: 'tab-label', text: 'Music' }),
       ],
     );
   }
@@ -1123,7 +1182,7 @@ export class App implements ShellHostish {
    * The editor area shows one view at a time: the text editor, a media
    * preview, the Test Play preview, or the timeline preview monitor.
    */
-  private setActiveView(view: 'editor' | 'play' | 'media' | 'preview'): void {
+  private setActiveView(view: 'editor' | 'play' | 'media' | 'preview' | 'music'): void {
     const changed = this.activeView !== view;
     this.activeView = view;
     this.previewView.setActive(view === 'preview');
@@ -1131,6 +1190,7 @@ export class App implements ShellHostish {
     this.mediaPane.classList.toggle('hidden', view !== 'media');
     this.playPane.classList.toggle('hidden', view !== 'play');
     this.previewPane.classList.toggle('hidden', view !== 'preview');
+    this.musicPane.classList.toggle('hidden', view !== 'music');
     this.playEmpty.classList.toggle('hidden', this.playHasRun);
     if (view === 'preview') {
       this.previewView.setDoc(this.timelineStore.current);
@@ -1149,6 +1209,10 @@ export class App implements ShellHostish {
     }
     if (this.activeView === 'preview') {
       this.breadcrumbs.appendChild(el('span', { text: 'Preview' }));
+      return;
+    }
+    if (this.activeView === 'music') {
+      this.breadcrumbs.appendChild(el('span', { text: 'Music' }));
       return;
     }
     if (!this.activePath) {
@@ -2298,6 +2362,42 @@ export class App implements ShellHostish {
     }
   }
 
+  /** Exports the timeline as a PNG frame sequence inside a ZIP archive. */
+  async exportFrames(): Promise<void> {
+    try {
+      const doc = await this.timelineStore.load();
+      const frames = frameSequence(doc, { maxFrames: 60 });
+      if (frames.length === 0) {
+        toast('Export frames', 'Add a clip to the timeline first.', 'warning', 2600);
+        return;
+      }
+      const files: Array<{ name: string; bytes: Uint8Array }> = [];
+      for (const frame of frames) {
+        const blob = await this.previewView.captureFrame(frame.timeMs);
+        if (!blob) continue;
+        files.push({
+          name: frameFileName(frameIndexAt(frame.timeMs, frame.fps), frame.fps),
+          bytes: new Uint8Array(await blob.arrayBuffer()),
+        });
+      }
+      files.push({
+        name: 'manifest.json',
+        bytes: new TextEncoder().encode(manifestForFrames(frames, doc.fps)),
+      });
+      const zip = await buildFrameZip(files);
+      const url = URL.createObjectURL(new Blob([zip.slice().buffer], { type: 'application/zip' }));
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${this.workspace.name || 'flaxia-studio'}-frames.zip`;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      this.log(`Exported ${files.length - 1} timeline frame(s) as ZIP.`);
+      toast('Export frames', `${files.length - 1} frame(s) exported.`, 'success', 2600);
+    } catch (error) {
+      toast('Export frames failed', error instanceof Error ? error.message : String(error), 'error');
+    }
+  }
+
   async exportWorkspace(): Promise<void> {
     try {
       const bytes = await this.workspace.exportZip();
@@ -2373,6 +2473,42 @@ export class App implements ShellHostish {
     this.root.classList.toggle('is-panel-hidden', !this.panelVisible);
     this.layout();
     if (this.panelVisible) this.shell.fit();
+  }
+
+  private static readonly MUSIC_PATH = '.flaxia/music.json';
+
+  private async loadMusicDocument(): Promise<void> {
+    const raw = this.workspace.readFile(App.MUSIC_PATH);
+    if (!raw) return;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && Array.isArray((parsed as NoteClip).notes)) {
+        this.musicPanel.setClip(parsed as NoteClip);
+      }
+    } catch {
+      // A malformed music document falls back to an empty note track.
+    }
+  }
+
+  private scheduleMusicSave(clip: NoteClip): void {
+    if (this.musicSaveTimer !== undefined) window.clearTimeout(this.musicSaveTimer);
+    this.musicSaveTimer = window.setTimeout(() => {
+      this.musicSaveTimer = undefined;
+      void this.workspace.writeFile(App.MUSIC_PATH, JSON.stringify(clip)).catch(() => undefined);
+    }, 500);
+  }
+
+  /** Puts timeline edits on the same undo stack as text and file operations. */
+  private recordTimelineChange(previous: TimelineDoc, next: TimelineDoc, label: string): void {
+    if (previous === next) return;
+    void this.history.push({
+      id: `timeline:${Date.now().toString(36)}:${label}`,
+      label,
+      mergeKey: `timeline:${label}`,
+      execute: () => undefined,
+      undo: () => this.timelineStore.apply(previous),
+      redo: () => this.timelineStore.apply(next),
+    });
   }
 
   private handleTimelineChange(): void {
@@ -2876,6 +3012,30 @@ export class App implements ShellHostish {
         group: 'Workspace',
         icon: 'plus',
         run: () => void this.createWorkspace(),
+      },
+      {
+        id: 'music.open-piano-roll',
+        label: `Music: ${t('command.openPianoRoll')}`,
+        group: 'Music',
+        icon: 'file-audio',
+        run: () => this.setActiveView('music'),
+      },
+      {
+        id: 'music.add-note-track',
+        label: `Music: ${t('command.addNoteTrack')}`,
+        group: 'Music',
+        icon: 'plus',
+        run: () => {
+          this.timelineStore.updateWith((doc) => addTrack(doc, 'note'), 'Add note track');
+          this.setActiveView('music');
+        },
+      },
+      {
+        id: 'video.export-frames',
+        label: 'Video: Export frames (ZIP)',
+        group: 'Video',
+        icon: 'file-video',
+        run: () => void this.exportFrames(),
       },
       {
         id: 'workspace.export-arcade',

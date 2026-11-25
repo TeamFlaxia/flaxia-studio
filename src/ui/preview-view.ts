@@ -14,7 +14,15 @@ import type { Workspace } from '../fs/workspace.ts';
 import { el, iconButton } from '../lib/dom';
 import { icon } from '../lib/icons';
 import { DEFAULT_MEDIA_ADJUSTMENTS, type MediaAdjustments, mediaKind } from '../lib/media';
-import { type Clip, clipEnd, formatTimecode, type TimelineDoc, timelineDuration } from '../lib/timeline';
+import {
+  type Clip,
+  clipEnd,
+  formatTimecode,
+  isAudibleTrack,
+  type TimelineDoc,
+  type Track,
+  timelineDuration,
+} from '../lib/timeline';
 
 export interface PreviewViewOptions {
   workspace: Workspace;
@@ -186,6 +194,19 @@ export class PreviewView {
     this.updateTransport();
   }
 
+  /**
+   * Renders one timeline frame and returns it as a PNG blob.
+   * Used by the frame-sequence exporter; the monitor need not be visible.
+   */
+  async captureFrame(ms: number): Promise<Blob | null> {
+    if (!this.doc) return null;
+    const duration = timelineDuration(this.doc);
+    this.playheadMs = Math.max(0, Math.min(duration, Math.round(ms)));
+    this.renderFrame(true);
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    return new Promise<Blob | null>((resolve) => this.canvas.toBlob(resolve, 'image/png'));
+  }
+
   /** Re-composites after adjustments change. */
   refresh(): void {
     if (!this.active && !this.playing) return;
@@ -326,8 +347,8 @@ export class PreviewView {
   // ------------------------------------------------------------
   // Compositing
   // ------------------------------------------------------------
-  private renderFrame(): void {
-    if (this.disposed || (!this.active && !this.playing)) return;
+  private renderFrame(force = false): void {
+    if (this.disposed || (!force && !this.active && !this.playing)) return;
     const ctx = this.ctx;
     const width = this.canvas.width;
     const height = this.canvas.height;
@@ -365,7 +386,7 @@ export class PreviewView {
   }
 
   private drawClip(node: HTMLImageElement | HTMLVideoElement, clip: Clip): void {
-    const adjustments = this.doc?.adjustments[clip.path] ?? DEFAULT_MEDIA_ADJUSTMENTS;
+    const adjustments = clip.adjustments ?? this.doc?.adjustments[clip.path] ?? DEFAULT_MEDIA_ADJUSTMENTS;
     const sourceWidth = node instanceof HTMLVideoElement ? node.videoWidth : node.naturalWidth;
     const sourceHeight = node instanceof HTMLVideoElement ? node.videoHeight : node.naturalHeight;
     if (!sourceWidth || !sourceHeight) return;
@@ -467,12 +488,13 @@ export class PreviewView {
     if (!this.active && !playing) return;
     const doc = this.doc;
     if (!doc) return;
-    const active = new Map<string, { clip: Clip; kind: 'video' | 'audio' }>();
+    const active = new Map<string, { clip: Clip; kind: 'video' | 'audio'; track: Track }>();
     for (const track of doc.tracks) {
+      if (!isAudibleTrack(doc, track.id)) continue;
       for (const clip of track.clips) {
         if (clip.startMs <= this.playheadMs && this.playheadMs < clipEnd(clip)) {
           const kind = mediaKind(clip.path);
-          if (kind === 'video' || kind === 'audio') active.set(clip.id, { clip, kind });
+          if (kind === 'video' || kind === 'audio') active.set(clip.id, { clip, kind, track });
         }
       }
     }
@@ -485,6 +507,12 @@ export class PreviewView {
     for (const [id, { clip, kind }] of active) {
       const element = this.elements.get(id) ?? this.ensureMedia(clip, kind);
       if (!element) continue;
+      let gain = clip.gain ?? 1;
+      const elapsed = this.playheadMs - clip.startMs;
+      if (clip.fadeInMs && elapsed < clip.fadeInMs) gain *= Math.max(0, elapsed / clip.fadeInMs);
+      const remaining = clipEnd(clip) - this.playheadMs;
+      if (clip.fadeOutMs && remaining < clip.fadeOutMs) gain *= Math.max(0, remaining / clip.fadeOutMs);
+      element.volume = Math.min(1, Math.max(0, gain));
       const target = clipTarget(clip, this.playheadMs);
       const drift = Math.abs(element.currentTime - target);
       if (drift > (playing ? 0.3 : 0.05)) {

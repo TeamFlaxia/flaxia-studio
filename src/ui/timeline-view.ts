@@ -17,17 +17,26 @@ import { mediaKind } from '../lib/media';
 import {
   addClip,
   addTrack,
+  barDurationMs,
+  beatDurationMs,
   type Clip,
   clipEnd,
+  DEFAULT_TEMPO,
   findClip,
   formatTimecode,
+  isAudibleTrack,
+  isTrackLocked,
   MIN_CLIP_MS,
   moveClip,
+  quantizeClip,
   removeClip,
+  setTrackFlag,
   snapCandidates,
   snapMs,
   splitClip,
   type TimelineDoc,
+  type Track,
+  type TrackFlag,
   timelineDuration,
   trimClip,
 } from '../lib/timeline';
@@ -84,6 +93,7 @@ export class TimelineView {
   private readonly playheadEl: HTMLElement;
   private readonly dropLine: HTMLElement;
   private readonly mediaHost: HTMLElement;
+  private readonly options: TimelineViewOptions;
 
   private doc: TimelineDoc | null = null;
   private pxPerSecond = 80;
@@ -99,7 +109,8 @@ export class TimelineView {
   private blobUrls = new Map<string, string>();
   private disposed = false;
 
-  constructor(private readonly options: TimelineViewOptions) {
+  constructor(options: TimelineViewOptions) {
+    this.options = options;
     this.timecode = el('span', { class: 'timeline-timecode mono', text: '00:00:00:00' });
     this.total = el('span', { class: 'timeline-total mono', text: '/ 00:00:00:00' });
     this.playButton = iconButton('play', 'Play', () => this.togglePlay(), { size: 14 });
@@ -206,12 +217,13 @@ export class TimelineView {
   private renderToolbar(): void {
     const doc = this.doc;
     const duration = doc ? timelineDuration(doc) : 0;
-    this.timecode.textContent = formatTimecode(this.playheadMs, doc?.fps ?? 30);
-    this.total.textContent = `/ ${formatTimecode(duration, doc?.fps ?? 30)}`;
+    this.timecode.textContent = this.formatPosition(this.playheadMs);
+    this.total.textContent = `/ ${this.formatPosition(duration)}`;
     this.playButton.replaceChildren(icon(this.playing ? 'stop' : 'play', 14));
     this.playButton.title = this.playing ? 'Pause' : 'Play';
     this.snapButton.setAttribute('aria-pressed', String(this.snap));
-    this.deleteButton.disabled = this.selectedClipId === null;
+    const selected = this.selectedClipId && doc ? findClip(doc, this.selectedClipId) : null;
+    this.deleteButton.disabled = !selected || (doc !== null && isTrackLocked(doc, selected.track.id));
     this.host.classList.toggle('is-playing', this.playing);
   }
 
@@ -219,18 +231,42 @@ export class TimelineView {
     const doc = this.doc;
     this.ruler.replaceChildren();
     if (!doc) return;
+    if (doc.mode === 'music') this.renderMusicRuler(doc);
+    else this.renderSecondsRuler(doc);
+    this.ruler.style.width = `${Math.max(0, this.contentWidth() - LABEL_WIDTH)}px`;
+  }
+
+  private renderSecondsRuler(doc: TimelineDoc): void {
     const step = this.rulerStepSeconds();
     const durationMs = Math.max(timelineDuration(doc), step * 1000 * 4);
     const endSeconds = Math.ceil(durationMs / 1000 / step) * step;
     for (let seconds = 0; seconds <= endSeconds; seconds += step) {
-      const left = (seconds / 1000) * this.pxPerSecond * 1000;
       const tick = el('span', { class: 'timeline-tick' }, [
         el('span', { class: 'timeline-tick-label mono', text: formatRulerLabel(seconds) }),
       ]);
-      tick.style.left = `${left}px`;
+      tick.style.left = `${this.msToPx(seconds * 1000)}px`;
       this.ruler.appendChild(tick);
     }
-    this.ruler.style.width = `${Math.max(0, this.contentWidth() - LABEL_WIDTH)}px`;
+  }
+
+  /** Music mode: bar ticks (labeled) and beat/subdivision ticks. */
+  private renderMusicRuler(doc: TimelineDoc): void {
+    const beat = beatDurationMs(doc.tempo);
+    const bar = barDurationMs(doc.tempo);
+    const tempo = doc.tempo ?? DEFAULT_TEMPO;
+    const beatsPerBar = Math.max(1, Math.round((tempo.numerator * 4) / tempo.denominator));
+    const durationMs = Math.max(timelineDuration(doc), bar * 4);
+    const endMs = Math.ceil(durationMs / bar) * bar;
+    let count = 0;
+    for (let index = 0; index * beat <= endMs && count < 2000; index += 1, count += 1) {
+      const isBar = index % beatsPerBar === 0;
+      const label = isBar ? `${Math.floor(index / beatsPerBar) + 1}.1` : `${(index % beatsPerBar) + 1}`;
+      const tick = el('span', { class: `timeline-tick ${isBar ? 'is-bar' : 'is-beat'}` }, [
+        el('span', { class: 'timeline-tick-label mono', text: label }),
+      ]);
+      tick.style.left = `${this.msToPx(index * beat)}px`;
+      this.ruler.appendChild(tick);
+    }
   }
 
   private renderLanes(): void {
@@ -241,17 +277,23 @@ export class TimelineView {
     this.empty.classList.toggle('hidden', hasClips);
     if (!doc) return;
 
-    const counters: Record<'video' | 'audio', number> = { video: 0, audio: 0 };
+    const counters: Record<Track['kind'], number> = { video: 0, audio: 0, note: 0 };
     doc.tracks.forEach((track) => {
       counters[track.kind] += 1;
-      const lane = el('div', { class: 'timeline-lane', dataset: { track: track.id } });
+      const lane = el('div', {
+        class: `timeline-lane ${track.locked === true ? 'is-locked' : ''}`.trim(),
+        dataset: { track: track.id },
+      });
       lane.style.height = `${LANE_HEIGHT}px`;
-      for (const clip of track.clips) lane.appendChild(this.buildClip(clip, track.kind));
+      for (const clip of track.clips) lane.appendChild(this.buildClip(clip, track));
+      const prefix = track.kind === 'video' ? 'V' : track.kind === 'audio' ? 'A' : 'N';
       const label = el('div', { class: 'timeline-track-label', dataset: { kind: track.kind } }, [
-        el('span', {
-          class: 'timeline-track-name',
-          text: `${track.kind === 'video' ? 'V' : 'A'}${counters[track.kind]}`,
-        }),
+        el('span', { class: 'timeline-track-name', text: `${prefix}${counters[track.kind]}` }),
+        el('div', { class: 'track-controls' }, [
+          this.buildTrackToggle(track, 'muted', 'track-mute', 'M', 'Mute track'),
+          this.buildTrackToggle(track, 'soloed', 'track-solo', 'S', 'Solo track'),
+          this.buildTrackToggle(track, 'locked', 'track-lock', 'L', 'Lock track'),
+        ]),
         iconButton('x', `Remove ${track.kind} track`, () => this.removeTrackById(track.id), { size: 12 }),
       ]);
       label.style.height = `${LANE_HEIGHT}px`;
@@ -261,10 +303,41 @@ export class TimelineView {
     });
   }
 
-  private buildClip(clip: Clip, kind: 'video' | 'audio'): HTMLElement {
+  private buildTrackToggle(
+    track: Track,
+    flag: TrackFlag,
+    className: string,
+    text: string,
+    title: string,
+  ): HTMLButtonElement {
+    const active = track[flag] === true;
+    return el(
+      'button',
+      {
+        class: `track-toggle ${className} ${active ? 'is-active' : ''}`.trim(),
+        type: 'button',
+        title,
+        text,
+        attrs: { 'aria-label': `${title} (${track.id})`, 'aria-pressed': String(active) },
+        on: {
+          click: (event) => {
+            event.stopPropagation();
+            this.toggleTrackFlag(track.id, flag);
+          },
+          pointerdown: (event) => event.stopPropagation(),
+        },
+      },
+      [],
+    );
+  }
+
+  private buildClip(clip: Clip, track: Track): HTMLElement {
+    const locked = track.locked === true;
     const node = el('div', {
-      class: `timeline-clip ${this.selectedClipId === clip.id ? 'is-selected' : ''}`.trim(),
-      dataset: { clip: clip.id, kind },
+      class: `timeline-clip ${this.selectedClipId === clip.id ? 'is-selected' : ''} ${
+        locked ? 'is-locked' : ''
+      }`.trim(),
+      dataset: { clip: clip.id, kind: track.kind },
       attrs: { title: `${clip.path} · ${formatTimecode(clip.durationMs, this.doc?.fps ?? 30)}` },
     });
     node.style.left = `${this.msToPx(clip.startMs)}px`;
@@ -284,12 +357,21 @@ export class TimelineView {
 
   private renderPlayhead(): void {
     this.playheadEl.style.left = `${LABEL_WIDTH + this.msToPx(this.playheadMs)}px`;
-    this.timecode.textContent = formatTimecode(this.playheadMs, this.doc?.fps ?? 30);
+    this.timecode.textContent = this.formatPosition(this.playheadMs);
   }
 
   // ------------------------------------------------------------
   // Editing
   // ------------------------------------------------------------
+  /** Applies a model result through the store with a history label. */
+  private commit(next: TimelineDoc, label: string): void {
+    const doc = this.doc;
+    if (!doc || next === doc) return;
+    this.doc = next;
+    this.options.store.update(next, label);
+    this.render();
+  }
+
   private handleLanePointerDown(event: PointerEvent): void {
     if (event.button !== 0) return;
     const target = event.target as HTMLElement;
@@ -327,6 +409,8 @@ export class TimelineView {
     event.stopPropagation();
     this.select(clip.id);
     this.host.focus({ preventScroll: true });
+    // A locked lane is read-only: the pure model guards moves/trims too.
+    if (this.doc && isTrackLocked(this.doc, findClip(this.doc, clip.id)?.track.id ?? '')) return;
 
     const handle = (event.target as HTMLElement).closest('.timeline-clip-handle');
     const mode: DragState['mode'] = handle
@@ -432,9 +516,7 @@ export class TimelineView {
       const snapped = this.snap ? snapMs(raw, this.snapCandidatesFor(drag.clipId, [this.playheadMs])) : raw;
       next = trimClip(doc, drag.clipId, 'end', snapped);
     }
-    this.doc = next;
-    this.options.store.update(next);
-    this.render();
+    this.commit(next, drag.mode === 'move' ? 'Move clip' : 'Trim clip');
   }
 
   // ------------------------------------------------------------
@@ -473,7 +555,7 @@ export class TimelineView {
     event.preventDefault();
     event.stopPropagation();
     const ms = this.dropTime(event.clientX);
-    const candidates = this.doc ? snapCandidates(this.doc, undefined, [this.playheadMs]) : [];
+    const candidates = this.snapCandidatesFor(null, [this.playheadMs]);
     const start = this.snap && candidates.length > 0 ? snapMs(ms, candidates) : ms;
     const trackId = this.trackAt(event.clientY)?.id ?? null;
     this.hideDropTarget();
@@ -522,17 +604,25 @@ export class TimelineView {
     const { clip, track } = found;
     const offset = this.playheadMs - clip.startMs;
     const canSplit = offset >= MIN_CLIP_MS && clip.durationMs - offset >= MIN_CLIP_MS;
+    const locked = track.locked === true;
 
     showContextMenu(x, y, [
       {
         label: 'Split at playhead',
         icon: 'scissors',
-        disabled: !canSplit,
+        disabled: locked || !canSplit,
         run: () => this.splitAt(clipId),
+      },
+      {
+        label: 'Quantize',
+        icon: 'check',
+        disabled: locked,
+        run: () => this.quantizeClipById(clipId),
       },
       {
         label: 'Duplicate',
         icon: 'copy',
+        disabled: locked,
         run: () => this.duplicateClip(clipId),
       },
       {
@@ -546,9 +636,20 @@ export class TimelineView {
         run: () => this.options.onOpenSource(clip.path),
       },
       {
+        label: 'Toggle mute',
+        icon: 'x',
+        run: () => this.toggleTrackFlag(track.id, 'muted'),
+      },
+      {
+        label: 'Toggle solo',
+        icon: 'play',
+        run: () => this.toggleTrackFlag(track.id, 'soloed'),
+      },
+      {
         label: 'Delete clip',
         icon: 'trash',
         danger: true,
+        disabled: locked,
         run: () => this.deleteClip(clipId),
       },
       {
@@ -581,11 +682,7 @@ export class TimelineView {
   private splitAt(clipId: string): void {
     const doc = this.doc;
     if (!doc) return;
-    const next = splitClip(doc, clipId, this.playheadMs);
-    if (next === doc) return;
-    this.doc = next;
-    this.options.store.update(next);
-    this.render();
+    this.commit(splitClip(doc, clipId, this.playheadMs), 'Split clip');
   }
 
   private duplicateClip(clipId: string): void {
@@ -593,22 +690,49 @@ export class TimelineView {
     if (!doc) return;
     const found = findClip(doc, clipId);
     if (!found) return;
-    const next = addClip(doc, found.track.id, found.clip.path, clipEnd(found.clip), {
-      inMs: found.clip.inMs,
-      durationMs: found.clip.durationMs,
-    });
-    this.doc = next;
-    this.options.store.update(next);
-    this.render();
+    this.commit(
+      addClip(doc, found.track.id, found.clip.path, clipEnd(found.clip), {
+        inMs: found.clip.inMs,
+        durationMs: found.clip.durationMs,
+      }),
+      'Duplicate clip',
+    );
   }
 
   private deleteClip(clipId: string): void {
     const doc = this.doc;
     if (!doc) return;
-    this.doc = removeClip(doc, clipId);
+    const next = removeClip(doc, clipId);
+    if (next === doc) return;
     if (this.selectedClipId === clipId) this.selectedClipId = null;
-    this.options.store.update(this.doc);
-    this.render();
+    this.commit(next, 'Delete clip');
+  }
+
+  private toggleTrackFlag(trackId: string, flag: TrackFlag): void {
+    const doc = this.doc;
+    if (!doc) return;
+    const track = doc.tracks.find((entry) => entry.id === trackId);
+    if (!track) return;
+    const label = flag === 'muted' ? 'Toggle mute' : flag === 'soloed' ? 'Toggle solo' : 'Toggle lock';
+    this.commit(setTrackFlag(doc, trackId, flag, track[flag] !== true), label);
+  }
+
+  private quantizeClipById(clipId: string): void {
+    const doc = this.doc;
+    if (!doc) return;
+    this.commit(quantizeClip(doc, clipId, 4), 'Quantize clip');
+  }
+
+  /** `Q`: quantize the clip under the playhead (or the selected clip). */
+  private quantizeAtPlayhead(): void {
+    const doc = this.doc;
+    if (!doc) return;
+    const underHead = doc.tracks
+      .filter((track) => !isTrackLocked(doc, track.id))
+      .flatMap((track) => track.clips)
+      .find((clip) => clip.startMs <= this.playheadMs && this.playheadMs < clipEnd(clip));
+    const clipId = underHead?.id ?? this.selectedClipId;
+    if (clipId) this.quantizeClipById(clipId);
   }
 
   private zoomToFit(): void {
@@ -638,39 +762,35 @@ export class TimelineView {
       event.preventDefault();
       const doc = this.doc;
       if (!doc) return;
-      const next = splitClip(doc, this.selectedClipId, this.playheadMs);
-      if (next !== doc) {
-        this.doc = next;
-        this.options.store.update(next);
-        this.render();
-      }
+      this.commit(splitClip(doc, this.selectedClipId, this.playheadMs), 'Split clip');
+      return;
+    }
+    if (event.key === 'q' || event.key === 'Q') {
+      event.preventDefault();
+      this.quantizeAtPlayhead();
     }
   }
 
   private deleteSelected(): void {
     const doc = this.doc;
     if (!doc || !this.selectedClipId) return;
-    this.doc = removeClip(doc, this.selectedClipId);
+    const next = removeClip(doc, this.selectedClipId);
+    if (next === doc) return;
     this.selectedClipId = null;
-    this.options.store.update(this.doc);
-    this.render();
+    this.commit(next, 'Delete clip');
   }
 
-  private addTrack(kind: 'video' | 'audio'): void {
+  private addTrack(kind: Track['kind']): void {
     const doc = this.doc;
     if (!doc) return;
-    this.doc = addTrack(doc, kind);
-    this.options.store.update(this.doc);
-    this.render();
+    this.commit(addTrack(doc, kind), 'Add track');
   }
 
   private removeTrackById(trackId: string): void {
     const doc = this.doc;
     if (!doc) return;
     const next: TimelineDoc = { ...doc, tracks: doc.tracks.filter((track) => track.id !== trackId) };
-    this.doc = next;
-    this.options.store.update(next);
-    this.render();
+    this.commit(next, 'Remove track');
   }
 
   private select(clipId: string | null): void {
@@ -750,6 +870,7 @@ export class TimelineView {
     if (!doc) return;
     const active = new Map<string, Clip>();
     for (const track of doc.tracks) {
+      if (!isAudibleTrack(doc, track.id)) continue;
       for (const clip of track.clips) {
         if (clip.startMs <= this.playheadMs && this.playheadMs < clipEnd(clip)) active.set(clip.id, clip);
       }
@@ -766,8 +887,21 @@ export class TimelineView {
       this.audio.set(id, element);
       const target = (clip.inMs + (this.playheadMs - clip.startMs)) / 1000;
       if (Math.abs(element.currentTime - target) > 0.3) element.currentTime = target;
+      element.volume = this.clipVolume(clip);
       if (element.paused) void element.play().catch(() => undefined);
     }
+  }
+
+  /** Gain plus linear fades, evaluated at the current playhead. */
+  private clipVolume(clip: Clip): number {
+    let volume = Math.min(1, Math.max(0, clip.gain ?? 1));
+    if (clip.fadeInMs && clip.fadeInMs > 0) {
+      volume *= Math.min(1, Math.max(0, (this.playheadMs - clip.startMs) / clip.fadeInMs));
+    }
+    if (clip.fadeOutMs && clip.fadeOutMs > 0) {
+      volume *= Math.min(1, Math.max(0, (clipEnd(clip) - this.playheadMs) / clip.fadeOutMs));
+    }
+    return Math.min(1, Math.max(0, volume));
   }
 
   private createElement(path: string): HTMLMediaElement | null {
@@ -807,6 +941,19 @@ export class TimelineView {
     this.options.onPlayheadChange(this.playheadMs);
   }
 
+  /** Bar/beat/subdivision display in music mode, timecode in video mode. */
+  private formatPosition(ms: number): string {
+    const doc = this.doc;
+    if (doc?.mode !== 'music') return formatTimecode(ms, doc?.fps ?? 30);
+    const beat = beatDurationMs(doc.tempo);
+    const bar = barDurationMs(doc.tempo);
+    const position = Math.max(0, ms);
+    const barNumber = Math.floor(position / bar) + 1;
+    const beatNumber = Math.floor((position % bar) / beat) + 1;
+    const subdivision = Math.floor(((position % beat) / beat) * 4) + 1;
+    return `${barNumber}.${beatNumber}.${subdivision}`;
+  }
+
   private msToPx(ms: number): number {
     return (ms / 1000) * this.pxPerSecond;
   }
@@ -828,10 +975,11 @@ export class TimelineView {
     return 10;
   }
 
-  private snapCandidatesFor(clipId: string, extras: number[]): number[] {
+  private snapCandidatesFor(clipId: string | null, extras: number[]): number[] {
     const doc = this.doc;
     if (!doc) return extras;
-    return snapCandidates(doc, clipId, extras);
+    // `snapCandidates` adds the beat grid itself when doc.mode === 'music'.
+    return snapCandidates(doc, clipId ?? undefined, extras);
   }
 
   private trackAt(clientY: number): { id: string } | null {

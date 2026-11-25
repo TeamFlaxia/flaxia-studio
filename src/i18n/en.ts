@@ -23,6 +23,9 @@ export const en = {
     checkCompatibility: 'Check compatibility',
     exportForArcade: 'Export for Arcade',
     newProjectFromTemplate: 'New project from template',
+    openPianoRoll: 'Open Piano Roll',
+    exportFrames: 'Export frames',
+    addNoteTrack: 'Add note track',
   },
   play: {
     entryPoint: 'Entry point',
@@ -32,6 +35,9 @@ export const en = {
     problemsFound: '{count} problem(s) found',
     runtimeError: 'Runtime error',
     compatibilityWarning: 'Compatibility warning',
+    bpm: 'BPM',
+    scale: 'Scale',
+    noteTrack: 'Note track',
   },
   publish: {
     title: 'Publish project',

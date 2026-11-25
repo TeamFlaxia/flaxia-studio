@@ -1,22 +1,39 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { DEFAULT_MEDIA_ADJUSTMENTS, type MediaAdjustments } from '../src/lib/media.ts';
 import {
   addClip,
   addTrack,
+  barDurationMs,
+  beatCandidates,
+  beatDurationMs,
+  type Clip,
   clipEnd,
   createTimeline,
   DEFAULT_FPS,
+  DEFAULT_TEMPO,
   findClip,
   formatTimecode,
+  isAudibleTrack,
+  isTrackLocked,
   MIN_CLIP_MS,
   moveClip,
   parseTimeline,
+  quantizeClip,
+  quantizeMs,
   registerAsset,
   removeClip,
   serializeTimeline,
   setAdjustments,
+  setClipAdjustments,
+  setClipAudio,
+  setMode,
+  setTempo,
+  setTrackFlag,
+  snapCandidates,
   snapMs,
   splitClip,
+  type TimelineDoc,
   timelineDuration,
   trackEnd,
   trimClip,
@@ -306,4 +323,186 @@ test('parseTimeline sanitizes out-of-range adjustments', () => {
   assert.equal(adjustments.saturation, 50);
   assert.equal(adjustments.rotate, 0);
   assert.equal(adjustments.flip, true);
+});
+
+function clipById(doc: TimelineDoc, id: string): Clip {
+  const clip = findClip(doc, id)?.clip;
+  assert.ok(clip);
+  return clip;
+}
+
+test('v1 documents migrate to v2 with default tempo and mode', () => {
+  const legacy = {
+    version: 1,
+    fps: 25,
+    tracks: [
+      {
+        id: 'track-a',
+        kind: 'video',
+        clips: [{ id: 'clip-a', path: 'a.mp4', startMs: 500, inMs: 0, durationMs: 4000 }],
+      },
+    ],
+    assets: { 'a.mp4': { kind: 'video', durationMs: 10_000 } },
+    adjustments: {},
+  };
+  const doc = parseTimeline(legacy);
+  assert.equal(doc.version, 2);
+  assert.equal(doc.fps, 25);
+  assert.equal(doc.mode, 'video');
+  assert.deepEqual(doc.tempo, DEFAULT_TEMPO);
+  assert.equal(doc.tracks[0]?.clips[0]?.startMs, 500);
+  assert.equal(JSON.parse(serializeTimeline(doc)).version, 2);
+
+  const noteDoc = parseTimeline({ tracks: [{ kind: 'note', clips: [] }], mode: 'music' });
+  assert.equal(noteDoc.version, 2);
+  assert.equal(noteDoc.mode, 'music');
+  assert.equal(noteDoc.tracks[0]?.kind, 'note');
+});
+
+test('beat/bar math, beat candidates and quantize use the document tempo', () => {
+  const doc = createTimeline();
+  assert.equal(beatDurationMs(doc.tempo), 500);
+  assert.equal(barDurationMs(doc.tempo), 2000);
+
+  assert.deepEqual(beatCandidates(doc, 400, 1100, 1), [500, 1000]);
+  assert.deepEqual(beatCandidates(doc, 400, 1100, 4), [500, 625, 750, 875, 1000]);
+  assert.deepEqual(beatCandidates(doc, 0, 0, 4), [0]);
+  assert.equal(quantizeMs(doc, 1120, 1), 1000);
+  assert.equal(quantizeMs(doc, 1300, 1), 1500);
+  assert.equal(quantizeMs(doc, 1120), 1125);
+
+  const waltz = setTempo(doc, { bpm: 120, numerator: 3, denominator: 4 });
+  assert.equal(beatDurationMs(waltz.tempo), 500);
+  assert.equal(barDurationMs(waltz.tempo), 1500);
+  assert.deepEqual(beatCandidates(waltz, 0, 1500, 1), [0, 500, 1000, 1500]);
+
+  const music = setMode(doc, 'music');
+  const snapTargets = snapCandidates(music);
+  assert.ok(snapTargets.includes(0));
+  assert.ok(snapTargets.includes(500));
+  assert.ok(snapTargets.includes(1000));
+  assert.ok(snapTargets.includes(125));
+  assert.deepEqual(snapCandidates(doc), [0]);
+
+  // Bad values fall back to safe musical defaults.
+  const broken = setTempo(doc, { bpm: 0, numerator: 0, denominator: 0 });
+  assert.equal(beatDurationMs(broken.tempo), beatDurationMs(DEFAULT_TEMPO));
+});
+
+test('clip adjustments coexist with adjustments stored per source path', () => {
+  const pathAdjustments: MediaAdjustments = { ...DEFAULT_MEDIA_ADJUSTMENTS, brightness: 150 };
+  const clipAdjustments: MediaAdjustments = {
+    brightness: 130,
+    contrast: 110,
+    saturation: 90,
+    rotate: 90,
+    flip: true,
+  };
+  let doc = setAdjustments(docWithTracks(), 'a.mp4', pathAdjustments);
+  doc = addClip(doc, videoTrack(doc).id, 'a.mp4', 500, { durationMs: 4000 });
+  const id = videoTrack(doc).clips[0]?.id;
+  assert.ok(id);
+  doc = setClipAdjustments(doc, id, clipAdjustments);
+
+  assert.deepEqual(doc.adjustments['a.mp4'], pathAdjustments);
+  assert.deepEqual(clipById(doc, id).adjustments, clipAdjustments);
+
+  const restored = parseTimeline(JSON.parse(serializeTimeline(doc)));
+  assert.deepEqual(restored.adjustments['a.mp4'], pathAdjustments);
+  assert.deepEqual(clipById(restored, id).adjustments, clipAdjustments);
+
+  doc = setClipAdjustments(doc, id, DEFAULT_MEDIA_ADJUSTMENTS);
+  assert.equal(clipById(doc, id).adjustments, undefined);
+  assert.deepEqual(doc.adjustments['a.mp4'], pathAdjustments);
+});
+
+test('track flags control audibility and a solo makes other tracks silent', () => {
+  let doc = docWithTracks();
+  const videoId = videoTrack(doc).id;
+  const audioId = audioTrack(doc).id;
+  assert.equal(isAudibleTrack(doc, videoId), true);
+  assert.equal(isAudibleTrack(doc, 'missing'), false);
+
+  doc = setTrackFlag(doc, videoId, 'muted', true);
+  assert.equal(videoTrack(doc).muted, true);
+  assert.equal(isAudibleTrack(doc, videoId), false);
+  doc = setTrackFlag(doc, videoId, 'muted', false);
+  assert.equal(videoTrack(doc).muted, false);
+  assert.equal(isAudibleTrack(doc, videoId), true);
+
+  doc = setTrackFlag(doc, audioId, 'soloed', true);
+  assert.equal(isAudibleTrack(doc, videoId), false);
+  assert.equal(isAudibleTrack(doc, audioId), true);
+  doc = setTrackFlag(doc, videoId, 'soloed', true);
+  assert.equal(isAudibleTrack(doc, videoId), true);
+  doc = setTrackFlag(doc, audioId, 'muted', true);
+  assert.equal(isAudibleTrack(doc, audioId), false);
+  doc = setTrackFlag(doc, audioId, 'soloed', false);
+  doc = setTrackFlag(doc, audioId, 'muted', false);
+  assert.equal(isAudibleTrack(doc, videoId), true);
+
+  const restored = parseTimeline(JSON.parse(serializeTimeline(doc)));
+  assert.equal(videoTrack(restored).soloed, true);
+  assert.equal(audioTrack(restored).muted, false);
+});
+
+test('per-clip gain and fades round-trip through JSON', () => {
+  let doc = docWithTracks();
+  doc = addClip(doc, videoTrack(doc).id, 'a.mp4', 0, { durationMs: 4000 });
+  const id = videoTrack(doc).clips[0]?.id;
+  assert.ok(id);
+  doc = setClipAudio(doc, id, { gain: 0.5, fadeInMs: 200, fadeOutMs: 300 });
+  const clip = clipById(doc, id);
+  assert.equal(clip.gain, 0.5);
+  assert.equal(clip.fadeInMs, 200);
+  assert.equal(clip.fadeOutMs, 300);
+
+  doc = setClipAudio(doc, id, { gain: -3 });
+  assert.equal(clipById(doc, id).gain, 0);
+  assert.equal(clipById(doc, id).fadeInMs, 200);
+
+  const restored = parseTimeline(JSON.parse(serializeTimeline(doc)));
+  assert.deepEqual(clipById(restored, id).gain, 0);
+  assert.equal(clipById(restored, id).fadeInMs, 200);
+  assert.equal(clipById(restored, id).fadeOutMs, 300);
+});
+
+test('locked tracks reject move, trim, split, add and remove', () => {
+  let doc = docWithTracks();
+  const trackId = videoTrack(doc).id;
+  doc = addClip(doc, trackId, 'a.mp4', 1000, { durationMs: 4000 });
+  const id = videoTrack(doc).clips[0]?.id;
+  assert.ok(id);
+
+  doc = setTrackFlag(doc, trackId, 'locked', true);
+  assert.equal(isTrackLocked(doc, trackId), true);
+  assert.equal(moveClip(doc, id, trackId, 3000), doc);
+  assert.equal(trimClip(doc, id, 'end', 6000), doc);
+  assert.equal(splitClip(doc, id, 3000), doc);
+  assert.equal(removeClip(doc, id), doc);
+  assert.equal(addClip(doc, trackId, 'a.mp4', 8000), doc);
+  assert.equal(clipById(doc, id).startMs, 1000);
+  assert.equal(clipById(doc, id).durationMs, 4000);
+
+  const unlocked = setTrackFlag(doc, trackId, 'locked', false);
+  assert.equal(isTrackLocked(unlocked, trackId), false);
+  const moved = moveClip(unlocked, id, trackId, 3000);
+  assert.equal(clipById(moved, id).startMs, 3000);
+  assert.equal(clipById(trimClip(moved, id, 'end', 6000), id).durationMs, 3000);
+  assert.equal(removeClip(moved, id).tracks[0]?.clips.length, 0);
+});
+
+test('quantizeClip snaps a clip start to the grid and skips locked tracks', () => {
+  let doc = docWithTracks();
+  const trackId = videoTrack(doc).id;
+  doc = addClip(doc, trackId, 'a.mp4', 1120, { durationMs: 4000 });
+  const id = videoTrack(doc).clips[0]?.id;
+  assert.ok(id);
+
+  const quantized = quantizeClip(doc, id);
+  assert.equal(clipById(quantized, id).startMs, 1125);
+  assert.equal(clipById(quantized, id).durationMs, 4000);
+
+  const locked = setTrackFlag(doc, trackId, 'locked', true);
+  assert.equal(quantizeClip(locked, id), locked);
 });
